@@ -40,4 +40,5 @@ target/
 *.json
 *.joblib
 *.lock
-Cargo.lock
+
+gesto-*/
