@@ -1,4 +1,4 @@
-# Gesture Recognition Workspace
+# Reconocimiento de gestos con Rust y Python
 
 Este proyecto integra procesamiento de gestos IMU usando Rust y un pipeline de Machine Learning en Python.
 
@@ -27,7 +27,7 @@ rust/
 └── README.md                      # Este archivo
 ```
 
-## 🔄 Flujo de Ejecución
+## Flujo de Ejecución
 
 ```mermaid
 graph LR
