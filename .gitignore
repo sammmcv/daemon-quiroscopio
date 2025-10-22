@@ -35,6 +35,9 @@ target/
 # Ignorar archivos temporales o binarios
 *.log
 *.tmp
-
-
-
+*.sh
+*.onnx
+*.json
+*.joblib
+*.lock
+Cargo.lock
