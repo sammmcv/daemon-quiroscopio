@@ -1,79 +1,41 @@
-# Reconocimiento de gestos con Rust y Python
+# Reconocimiento de gestos BLE en tiempo real con Rust + Python
 
-Este proyecto integra procesamiento de gestos IMU usando Rust y un pipeline de Machine Learning en Python.
+Este proyecto permite reconocer gestos de mano en tiempo real usando sensores IMU conectados por Bluetooth Low Energy (BLE), procesando los datos en Rust y ejecutando la inferencia de gestos con un pipeline de Machine Learning en Python.
 
-## Estructura del Workspace
+## Estructura del proyecto
 
 ```
-rust/
 ├── src/
-│   └── main.rs                    # Binario principal: procesa CSVs y ejecuta predicciones
+│   ├── main.rs                # Binario principal: recibe frames BLE y ejecuta inferencia
+│   ├── ble.rs                 # Módulo BLE: conexión y decodificación de frames
+│   └── gesture_buffer.rs      # Buffer circular para ventanas IMU
 ├── python/
-│   ├── gesture_infer.py           # Pipeline de clasificación Python
-│   ├── best_pipeline__time-summary__svm_linear.joblib  # Modelo SVM entrenado
-│   ├── robust_scaler_acc.joblib   # Scaler para acelerómetros
-│   └── labels.json                # Lista de clases de gestos
-├── gesto-drop/                    # Carpeta con CSVs del gesto "drop"
-│   ├── 000001_plot.csv
-│   ├── 000002_plot.csv
-│   └── ...
-├── gesto-grab/                    # Carpeta con CSVs del gesto "grab"
-├── gesto-slide-derecha/           # Carpeta con CSVs del gesto "slide-derecha"
-├── gesto-slide-izquierda/         # Carpeta con CSVs del gesto "slide-izquierda"
-├── gesto-zoom-in/                 # Carpeta con CSVs del gesto "zoom-in"
-├── gesto-zoom-out/                # Carpeta con CSVs del gesto "zoom-out"
-├── gesto-test/                    # Carpeta con CSVs de prueba
-├── Cargo.toml                     # Configuración del proyecto Rust
-└── README.md                      # Este archivo
+│   ├── gesture_infer.py       # Pipeline de clasificación Python
+│   ├── best_pipeline__*.joblib  # Modelo SVM entrenado
+│   ├── robust_scaler_acc.joblib # Scaler para acelerómetros
+│   └── labels.json            # Lista de clases de gestos
+├── Cargo.toml                 # Configuración Rust
+└── README.md                  # Este archivo
 ```
 
-## Flujo de Ejecución
+## Flujo de ejecución
 
-```mermaid
-graph LR
-    A[Carpetas gesto-*] --> B[main.rs]
-    B --> C[Lee CSV 64x5x7]
-    C --> D[Convierte a Array]
-    D --> E[PyO3: Embebe Python]
-    E --> F[gesture_infer.py]
-    F --> G[Normaliza cuaterniones]
-    G --> H[Aplica RobustScaler]
-    H --> I[Extrae 420 features]
-    I --> J[Pipeline SVM]
-    J --> K[Predicción + Confianza]
-    K --> L[Muestra Resultados]
-```
+1. **Conexión BLE**: Rust se conecta a los sensores IMU vía Bluetooth y recibe frames en tiempo real.
+2. **Buffer de ventanas**: Los datos se acumulan en un buffer circular de 64 muestras por sensor.
+3. **Inferencia Python**: Cuando hay suficiente movimiento, Rust llama al pipeline Python embebido (PyO3) para predecir el gesto.
+4. **Votación y salida**: Se estabilizan las predicciones con votación y se muestra el resultado en consola.
 
-### Paso a paso:
+## Instalación y dependencias
 
-1. **Rust detecta carpetas** — El binario busca todas las carpetas que empiezan con `gesto-*`
-2. **Lee CSVs** — Por cada carpeta, lee los primeros 30 archivos CSV ordenados alfabéticamente
-3. **Parsea ventana IMU** — Cada CSV se convierte en una ventana `[64 samples, 5 sensors, 7 channels]`
-   - Channels: `[ax, ay, az, w, i, j, k]` (acelerómetro + cuaternión)
-4. **Embebe Python con PyO3** — Rust inicializa el intérprete Python in-process (sin subprocesos)
-5. **Carga el clasificador** — Importa `GestureClassifier` desde `python/gesture_infer.py`
-6. **Pipeline de ML Python**:
-   - Normaliza cuaterniones (w ≥ 0)
-   - Aplica `RobustScaler` a acelerómetros
-   - Extrae 420 features de estadísticas (5 sensores × 7 canales × 12 stats)
-     - Stats: mean, std, min, max, p25, p50, p75, energy, rms, beta, skew, kurt
-   - Ejecuta el pipeline SVM lineal
-7. **Retorna predicción** — Label del gesto + confianza (0-1)
-8. **Valida y muestra** — Rust compara con el nombre de la carpeta y calcula métricas
-
-## Instalación y Dependencias
-
-### Prerequisitos
+### Requisitos
 - **Rust 2021+** — [Instalar](https://rustup.rs/)
 - **Python 3.8+** — Con pip instalado
 
 ### Dependencias Rust
-El proyecto usa las siguientes crates:
+En `Cargo.toml`:
 - `pyo3` — Embebe el intérprete Python
 - `numpy` — Puente Rust ↔ NumPy arrays
-- `csv` — Lectura de archivos CSV
-- `anyhow` — Manejo de errores
-- `serde_json` — Serialización JSON
+- `anyhow`, `serde_json`, `dbus`, `crossbeam-channel`
 
 Instala con:
 ```bash
@@ -88,160 +50,55 @@ pip install numpy scipy scikit-learn joblib pandas
 
 ## Ejecución
 
-### Método 1: Con cargo
+### Reconocimiento en tiempo real (BLE)
 ```bash
-cargo run --release
+./target/release/onnx-predictor <MAC_ADDRESS>
+# Ejemplo:
+./target/release/onnx-predictor 28:CD:C1:08:37:69
 ```
 
-### Método 2: Binario directo
-```bash
-./target/release/onnx-predictor
-```
-
-### Método 3: Debug resumido
-```bash
-./target/release/onnx-predictor 2>&1 | grep -E "📁|📊|📈|✅ Procesamiento"
-```
-
-## Ejemplo de Salida
-
-```
-🎯 Gesture Recognition System
-
-✅ Clasificador cargado desde python/
-
-📂 Carpetas encontradas: 7
-
-📁 Procesando: gesto-drop
-  📄 Archivos: 30
-  ✅ 000001_plot.csv → gesto-drop (99.5%)
-  ✅ 000002_plot.csv → gesto-drop (99.5%)
-  ...
-  📊 Precisión: 30/30 (100.0%)
-  📈 Confianza promedio: 99.5%
-
-📁 Procesando: gesto-grab
-  📄 Archivos: 30
-  ✅ 000001_plot.csv → gesto-grab (99.5%)
-  ...
-  📊 Precisión: 30/30 (100.0%)
-  📈 Confianza promedio: 99.5%
-
-✅ Procesamiento completado
-```
-
-### Símbolos de estado:
-- ✅ — Predicción correcta y confianza ≥ 90%
-- ⚠️  — Predicción correcta pero confianza < 90%
-- ❌ — Predicción incorrecta
-
-## Configuración y Personalización
-
-### Cambiar umbral de confianza
-Edita `src/main.rs`:
-```rust
-const UMBRAL: f32 = 0.90; // Cambia a 0.95 para más estrictez
-```
-
-### Procesar más/menos archivos
-Por defecto procesa 30 CSVs por carpeta. Para cambiar:
-```rust
-csv_files.truncate(30); // Cambia el número
-```
-
-### Agregar nuevas clases
-1. Crea una nueva carpeta `gesto-nuevo-gesto/`
-2. Agrega archivos CSV con el formato esperado
-3. Actualiza `python/labels.json` (si el modelo fue reentrenado)
-4. Ejecuta el binario
-
-### Formato de CSV esperado
-Cada CSV debe tener:
-- **Columnas**: `sample, sensor, ax, ay, az, w, i, j, k`
-- **Filas**: 320 (64 samples × 5 sensors)
-- **Valores**: Flotantes con acelerómetros y cuaterniones normalizados
-
-Ejemplo:
-```csv
-sample,sensor,ax,ay,az,w,i,j,k
-0,0,0.12,-0.34,9.81,0.98,0.01,0.02,0.03
-0,1,0.15,-0.32,9.79,0.97,0.02,0.01,0.04
-...
-```
-
-## Testing
-
-### Validar un solo CSV
-Modifica temporalmente `src/main.rs` para cargar un archivo específico, o usa el script Python:
+### Inferencia por CSV (Python)
 ```bash
 python3 python/gesture_infer.py --artifacts python --csv gesto-drop/000001_plot.csv
 ```
 
-### Comparar Rust vs Python
-Ambos deben dar resultados idénticos:
-```bash
-# Rust
-./target/release/onnx-predictor 2>&1 | grep "000001_plot"
+## Ejemplo de salida
 
-# Python
-python3 python/gesture_infer.py --artifacts python --csv gesto-drop/000001_plot.csv
+```
+🎯 Gesture Recognition System - BLE Real-Time
+
+✅ Clasificador cargado
+┌──────────────────────────────────────────────────────────────────┐
+│  Frames │ Predicción          │ Conf.  │ Votación     │ Mov.   │
+├──────────────────────────────────────────────────────────────────┤
+│    1234 │ ✅ gesto-grab       │  99.2% │ 3/3          │ [mov:1.23]
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-## Arquitectura Técnica
+## Personalización
 
-### Por qué Rust + Python (PyO3)?
-- **Rust**: Performance para I/O de archivos y orquestación
-- **Python embebido**: Reutiliza el pipeline ML sin reescribir
-- **PyO3**: Zero-copy entre Rust y NumPy arrays
-- **Sin subprocesos**: Más rápido que llamar scripts externos
+- Cambia el umbral de confianza en `src/main.rs`:
+  ```rust
+  const CONFIDENCE_THRESHOLD: f32 = 0.85;
+  ```
+- Cambia el umbral de movimiento para detectar gestos reales:
+  ```rust
+  const MOVEMENT_THRESHOLD: f32 = 1.0;
+  ```
 
-### Formato de ventana IMU
-```
-Shape: [64, 5, 7]
-       │   │  └─ Channels: [ax, ay, az, w, i, j, k]
-       │   └──── Sensors: 5 IMUs en la mano
-       └────────── Samples: 64 timesteps @ ~100Hz
-```
+## Formato de datos IMU
 
-### Pipeline de features
-El modelo **NO usa valores raw**. Extrae 420 estadísticas:
-```
-5 sensors × 7 channels × 12 statistics = 420 features
-```
-
-Estadísticas por canal:
-1. `mean` — Media
-2. `std` — Desviación estándar
-3. `min` / `max` — Rango
-4. `p25` / `p50` / `p75` — Percentiles
-5. `energy` — Suma de cuadrados
-6. `rms` — Root mean square
-7. `beta` — Pendiente (regresión lineal)
-8. `skew` — Asimetría
-9. `kurt` — Curtosis
-
-## Notas Importantes
-
-- **Python embebido**: El sistema requiere que Python esté instalado en el sistema con todos los paquetes
-- **Warnings de versión**: Los warnings de scikit-learn (1.6.1 vs 1.7.2) no afectan los resultados
-- **Sin ONNX Runtime**: La versión actual usa el pipeline Python directo, no el modelo `.onnx` exportado
-- **Memoria**: PyO3 mantiene Python en memoria, más eficiente que subprocesos
-- **Carpeta `gesto-test`**: Se procesa pero suele tener precisión 0% (contiene muestras mezcladas)
+- Cada frame: `[Option<[f32; 7]>; 5]` (5 sensores, 7 canales: ax, ay, az, w, i, j, k)
+- Ventana para inferencia: `[64, 5, 7]`
 
 ## Troubleshooting
 
-### Error: "ModuleNotFoundError: No module named 'gesture_infer'"
-- Verifica que `python/gesture_infer.py` exista
-- Ejecuta desde la raíz del proyecto, no desde subcarpetas
+- **Error de módulo Python**: Verifica que `python/gesture_infer.py` exista y que los artefactos estén en la carpeta correcta.
+- **Error de conexión BLE**: Asegúrate de que el adaptador Bluetooth esté encendido y el dispositivo disponible.
+- **Performance lento**: Usa `--release` y asegúrate de que los paquetes Python estén instalados.
 
-### Error: "FileNotFoundError: python/..."
-- Verifica que los archivos `.joblib` y `labels.json` estén en `python/`
+## Notas técnicas
 
-### Predicciones incorrectas
-- Verifica que los CSV tengan el formato correcto
-- Confirma que el modelo fue entrenado con el mismo preprocesado
-- Revisa que los archivos estén en la carpeta correcta
-
-### Performance lento
-- Usa `--release` siempre: `cargo build --release`
-- El primer archivo es más lento (carga del modelo)
+- El pipeline Python extrae 420 features por ventana (5 sensores × 7 canales × 12 estadísticas).
+- El sistema embebe Python en Rust usando PyO3, sin subprocesos externos.
+- El buffer circular permite ventanas deslizantes y manejo de sensores ausentes.

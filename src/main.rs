@@ -1,69 +1,52 @@
 /*
-Gesture Recognition usando Pipeline Python desde Rust
+Gesture Recognition en Tiempo Real con BLE
+
+Sistema de reconocimiento de gestos que:
+1. Recibe datos IMU desde dispositivos BLE (5 sensores)
+2. Acumula ventanas de 64 muestras en buffer circular
+3. Realiza predicciones en tiempo real usando clasificador Python
+4. Implementa votación para estabilizar predicciones
 
 Para compilar y ejecutar:
 cargo build --release
-./target/release/onnx-predictor
+./target/release/onnx-predictor <MAC_ADDRESS>
 
-O simplemente:
-
-cargo run --release
-o
-./target/release/onnx-predictor
-
-debugg por carpeta: ./target/release/onnx-predictor 2>&1 | grep -E "📁|📊|📈|✅ Procesamiento"
-
+Ejemplo:
+./target/release/onnx-predictor 28:CD:C1:08:37:69
 */
 
+mod ble;
+mod gesture_buffer;
+
 use anyhow::Result;
-use csv::ReaderBuilder;
+use crossbeam_channel::{bounded, select};
 use numpy::PyArray3;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use std::fs;
-use std::path::PathBuf;
+use std::collections::VecDeque;
+use std::env;
+use std::time::{Duration, Instant};
 
-const WINDOW_T: usize = 64;
+use ble::{SensorFrame, start_ble_receiver, get_stats};
+use gesture_buffer::GestureBuffer;
+
+const WINDOW_SIZE: usize = 64;
 const SENSORS: usize = 5;
 const CHANNELS: usize = 7;
-const UMBRAL: f32 = 0.90;
-
-/// Lee un CSV y retorna una ventana [64, 5, 7]
-fn read_csv_window(csv_path: &str) -> Result<[[[f32; CHANNELS]; SENSORS]; WINDOW_T]> {
-    let mut reader = ReaderBuilder::new()
-        .has_headers(true)
-        .from_path(csv_path)?;
-    
-    let mut window = [[[0.0f32; CHANNELS]; SENSORS]; WINDOW_T];
-    
-    for result in reader.records() {
-        let record = result?;
-        let sample: usize = record.get(0).unwrap().parse()?;
-        let sensor: usize = record.get(1).unwrap().parse()?;
-        
-        if sample < WINDOW_T && sensor < SENSORS {
-            window[sample][sensor][0] = record.get(2).unwrap().parse()?; // ax
-            window[sample][sensor][1] = record.get(3).unwrap().parse()?; // ay
-            window[sample][sensor][2] = record.get(4).unwrap().parse()?; // az
-            window[sample][sensor][3] = record.get(5).unwrap().parse()?; // w
-            window[sample][sensor][4] = record.get(6).unwrap().parse()?; // i
-            window[sample][sensor][5] = record.get(7).unwrap().parse()?; // j
-            window[sample][sensor][6] = record.get(8).unwrap().parse()?; // k
-        }
-    }
-    
-    Ok(window)
-}
+const VOTE_SIZE: usize = 3;  // Reducido para gestos más rápidos
+const CONFIDENCE_THRESHOLD: f32 = 0.85;  // Umbral aumentado para reducir falsos positivos
+const MOVEMENT_THRESHOLD: f32 = 1.0;  // Umbral más alto para detectar solo gestos reales
+const COOLDOWN_MS: u64 = 1000;  // Tiempo de espera entre gestos (ms)
 
 /// Predice un gesto desde una ventana usando el pipeline Python
 fn predict_window(
     py: Python<'_>,
     clf: &PyAny,
-    window: &[[[f32; CHANNELS]; SENSORS]; WINDOW_T],
+    window: &[[[f32; CHANNELS]; SENSORS]; WINDOW_SIZE],
 ) -> Result<(String, f32)> {
     // Convertir ventana Rust a numpy array Python
     let np_window = PyArray3::from_array(py, &numpy::ndarray::Array3::from_shape_fn(
-        (WINDOW_T, SENSORS, CHANNELS),
+        (WINDOW_SIZE, SENSORS, CHANNELS),
         |(t, s, c)| window[t][s][c],
     ));
     
@@ -77,129 +60,203 @@ fn predict_window(
     Ok((label, conf))
 }
 
-fn main() -> Result<()> {
-    println!("🎯 Gesture Recognition System\n");
+/// Realiza votación sobre las últimas N predicciones
+fn vote_prediction(history: &VecDeque<(String, f32)>) -> Option<(String, f32)> {
+    if history.is_empty() {
+        return None;
+    }
     
+    // Contar votos por clase
+    let mut votes: std::collections::HashMap<String, (usize, Vec<f32>)> = std::collections::HashMap::new();
+    
+    for (label, conf) in history {
+        let entry = votes.entry(label.clone()).or_insert((0, Vec::new()));
+        entry.0 += 1;
+        entry.1.push(*conf);
+    }
+    
+    // Encontrar la clase con más votos
+    let mut max_votes = 0;
+    let mut winner = None;
+    let mut winner_confs = Vec::new();
+    
+    for (label, (count, confs)) in votes {
+        if count > max_votes {
+            max_votes = count;
+            winner = Some(label);
+            winner_confs = confs;
+        }
+    }
+    
+    // Calcular confianza promedio del ganador
+    if let Some(label) = winner {
+        let avg_conf = winner_confs.iter().sum::<f32>() / winner_confs.len() as f32;
+        Some((label, avg_conf))
+    } else {
+        None
+    }
+}
+
+fn main() -> Result<()> {
+    println!("🎯 Gesture Recognition System - BLE Real-Time\n");
+    
+    // Obtener MAC address desde argumentos
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Uso: {} <MAC_ADDRESS>", args[0]);
+        eprintln!("Ejemplo: {} E8:9F:6D:2B:8D:9A", args[0]);
+        std::process::exit(1);
+    }
+    
+    let target_mac = &args[1];
+    println!("🎯 Objetivo BLE: {}\n", target_mac);
+    
+    // Canal para recibir frames BLE
+    let (tx, rx) = bounded::<SensorFrame>(100);
+    
+    // Lanzar hilo BLE en segundo plano
+    let target_mac_clone = target_mac.to_string();
+    std::thread::spawn(move || {
+        if let Err(e) = start_ble_receiver(&target_mac_clone, tx) {
+            eprintln!("❌ Error en BLE: {}", e);
+        }
+    });
+    
+    // Dar tiempo para la conexión BLE
+    std::thread::sleep(Duration::from_secs(3));
+    
+    // Inicializar clasificador Python
     Python::with_gil(|py| -> Result<()> {
-        // 1. Inicializar el clasificador Python
-        let sys = py.import("sys").map_err(|e| anyhow::anyhow!("Error importing sys: {}", e))?;
-        let sys_path: &pyo3::types::PyList = sys.getattr("path")
-            .map_err(|e| anyhow::anyhow!("Error getting sys.path: {}", e))?
-            .downcast()
-            .map_err(|e| anyhow::anyhow!("Error downcasting: {}", e))?;
-        sys_path.insert(0, "python")
-            .map_err(|e| anyhow::anyhow!("Error inserting path: {}", e))?;
+        println!("🔧 Inicializando clasificador Python...");
         
-        let gi = py.import("gesture_infer")
-            .map_err(|e| anyhow::anyhow!("Error importing gesture_infer: {}", e))?;
-        let cls = gi.getattr("GestureClassifier")
-            .map_err(|e| anyhow::anyhow!("Error getting GestureClassifier: {}", e))?;
+        let sys = py.import("sys")?;
+        let sys_path: &pyo3::types::PyList = sys.getattr("path")?.downcast().unwrap();
+        sys_path.insert(0, "python")?;
+        
+        let gi = py.import("gesture_infer")?;
+        let cls = gi.getattr("GestureClassifier")?;
         
         let kwargs = PyDict::new(py);
-        kwargs.set_item("artifacts_dir", "python")
-            .map_err(|e| anyhow::anyhow!("Error setting artifacts_dir: {}", e))?;
-        kwargs.set_item("try_calibrated", true)
-            .map_err(|e| anyhow::anyhow!("Error setting try_calibrated: {}", e))?;
+        kwargs.set_item("artifacts_dir", "python")?;
+        kwargs.set_item("try_calibrated", true)?;
         
-        let clf = cls.call((), Some(kwargs))
-            .map_err(|e| anyhow::anyhow!("Error calling GestureClassifier: {}", e))?;
+        let clf = cls.call((), Some(kwargs))?;
+        println!("✅ Clasificador cargado\n");
         
-        println!("✅ Clasificador cargado desde python/\n");
+        // Buffer circular y control de predicciones
+        let mut buffer = GestureBuffer::new();
+        let mut prediction_history: VecDeque<(String, f32)> = VecDeque::with_capacity(VOTE_SIZE);
+        let mut last_prediction_time = Instant::now();
+        let mut last_gesture_time = Instant::now();
+        let mut frames_received = 0u32;
+        let mut predictions_made = 0u32;
+        let mut in_cooldown = false;
         
-        // 2. Buscar todas las carpetas gesto-*
-        let gesto_dirs: Vec<PathBuf> = fs::read_dir(".")?
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| {
-                let path = entry.path();
-                path.is_dir() && path.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.starts_with("gesto-"))
-                    .unwrap_or(false)
-            })
-            .map(|entry| entry.path())
-            .collect();
+        println!("🎬 Iniciando reconocimiento en tiempo real...\n");
+        println!("┌──────────────────────────────────────────────────────────────────┐");
+        println!("│  Frames │ Predicción          │ Conf.  │ Votación     │ Mov.   │");
+        println!("├──────────────────────────────────────────────────────────────────┤");
         
-        if gesto_dirs.is_empty() {
-            println!("⚠️  No se encontraron carpetas gesto-*");
-            return Ok(());
-        }
-        
-        println!("� Carpetas encontradas: {}\n", gesto_dirs.len());
-        
-        // 3. Procesar cada carpeta
-        for gesto_dir in gesto_dirs {
-            let dir_name = gesto_dir.file_name().unwrap().to_str().unwrap();
-            println!("📁 Procesando: {}", dir_name);
-            
-            // Leer primeros 30 CSVs
-            let mut csv_files: Vec<PathBuf> = fs::read_dir(&gesto_dir)?
-                .filter_map(|entry| entry.ok())
-                .filter(|entry| {
-                    entry.path().extension()
-                        .and_then(|ext| ext.to_str())
-                        .map(|ext| ext == "csv")
-                        .unwrap_or(false)
-                })
-                .map(|entry| entry.path())
-                .collect();
-            
-            csv_files.sort();
-            csv_files.truncate(30);
-            
-            if csv_files.is_empty() {
-                println!("  ⚠️  Sin archivos CSV\n");
-                continue;
-            }
-            
-            println!("  📄 Archivos: {}", csv_files.len());
-            
-            // Procesar cada CSV
-            let mut correct = 0;
-            let mut total = 0;
-            let mut confidences = Vec::new();
-            
-            for csv_path in &csv_files {
-                let filename = csv_path.file_name().unwrap().to_str().unwrap();
-                
-                match read_csv_window(csv_path.to_str().unwrap()) {
-                    Ok(window) => {
-                        match predict_window(py, clf, &window) {
-                            Ok((label, conf)) => {
-                                total += 1;
-                                confidences.push(conf);
+        loop {
+            select! {
+                recv(rx) -> msg => {
+                    match msg {
+                        Ok(frame) => {
+                            frames_received += 1;
+                            buffer.push(frame);
+                            
+                            // Verificar si terminó el cooldown
+                            if in_cooldown && last_gesture_time.elapsed() > Duration::from_millis(COOLDOWN_MS) {
+                                in_cooldown = false;
+                                prediction_history.clear(); // Resetear historial para nuevo gesto
+                            }
+                            
+                            // Solo predecir cuando:
+                            // 1. No estemos en cooldown (esperando entre gestos)
+                            // 2. Tengamos suficientes datos (64 frames)
+                            // 3. Haya pasado al menos 300ms desde la última predicción
+                            // 4. Haya movimiento significativo detectado
+                            if !in_cooldown && 
+                               buffer.is_ready() && 
+                               last_prediction_time.elapsed() > Duration::from_millis(300) {
+                                let movement = buffer.get_movement_magnitude();
                                 
-                                // Verificar si la predicción es correcta
-                                if label == dir_name {
-                                    correct += 1;
-                                    if conf >= UMBRAL {
-                                        println!("  ✅ {} → {} ({:.1}%)", filename, label, conf * 100.0);
-                                    } else {
-                                        println!("  ⚠️  {} → {} ({:.1}%) [bajo umbral]", filename, label, conf * 100.0);
+                                // Solo predecir si hay movimiento significativo
+                                if movement >= MOVEMENT_THRESHOLD {
+                                    if let Some(window) = buffer.get_window() {
+                                        match predict_window(py, clf, &window) {
+                                            Ok((label, conf)) => {
+                                                predictions_made += 1;
+                                                
+                                                // Agregar a historia de votación
+                                                prediction_history.push_back((label.clone(), conf));
+                                                if prediction_history.len() > VOTE_SIZE {
+                                                    prediction_history.pop_front();
+                                                }
+                                                
+                                                // Realizar votación
+                                                if let Some((voted_label, voted_conf)) = vote_prediction(&prediction_history) {
+                                                    // Solo mostrar si cumple el umbral de confianza
+                                                    if voted_conf >= CONFIDENCE_THRESHOLD {
+                                                        let vote_info = format!("{}/{}", 
+                                                            prediction_history.iter().filter(|(l, _)| l == &voted_label).count(),
+                                                            prediction_history.len()
+                                                        );
+                                                        
+                                                        println!("│ {:>7} │ ✅ {:<15} │ {:>5.1}% │ {:>12} │ [mov:{:.2}]",
+                                                            frames_received,
+                                                            voted_label,
+                                                            voted_conf * 100.0,
+                                                            vote_info,
+                                                            movement
+                                                        );
+                                                        
+                                                        // Activar cooldown después de detectar un gesto
+                                                        in_cooldown = true;
+                                                        last_gesture_time = Instant::now();
+                                                    }
+                                                }
+                                                
+                                                last_prediction_time = Instant::now();
+                                            }
+                                            Err(e) => {
+                                                eprintln!("❌ Error en predicción: {}", e);
+                                            }
+                                        }
                                     }
-                                } else {
-                                    println!("  ❌ {} → {} (esperado: {}, {:.1}%)", filename, label, dir_name, conf * 100.0);
                                 }
                             }
-                            Err(e) => println!("  ❌ Error prediciendo {}: {}", filename, e),
+                        }
+                        Err(e) => {
+                            eprintln!("❌ Error recibiendo frame: {}", e);
+                            break;
                         }
                     }
-                    Err(e) => println!("  ❌ Error leyendo {}: {}", filename, e),
                 }
             }
             
-            // Resumen
-            let accuracy = if total > 0 { (correct as f32 / total as f32) * 100.0 } else { 0.0 };
-            let avg_conf = if !confidences.is_empty() {
-                confidences.iter().sum::<f32>() / confidences.len() as f32
-            } else {
-                0.0
-            };
-            
-            println!("  📊 Precisión: {}/{} ({:.1}%)", correct, total, accuracy);
-            println!("  📈 Confianza promedio: {:.1}%\n", avg_conf * 100.0);
+            // ... (Print de estadísticas deshabilitado)
+            // if frames_received % 500 == 0 && frames_received > 0 {
+            //     let stats = get_stats();
+            //     println!("├──────────────────────────────────────────────────────────────────┤");
+            //     println!("│ 📊 STATS: Frames={} Predicciones={} Pérdida={:.1}%              │",
+            //         stats.superframes,
+            //         predictions_made,
+            //         if stats.superframes > 0 {
+            //             (stats.lost_frames as f32 / stats.superframes as f32) * 100.0
+            //         } else {
+            //             0.0
+            //         }
+            //     );
+            //     println!("├──────────────────────────────────────────────────────────────────┤");
+            // }
         }
         
-        println!("✅ Procesamiento completado");
+        println!("└──────────────────────────────────────────────────────────────────┘");
+        println!("\n✅ Sesión finalizada");
+        println!("   Frames totales: {}", frames_received);
+        println!("   Predicciones: {}", predictions_made);
+        
         Ok(())
     })
 }

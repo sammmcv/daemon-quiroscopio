@@ -42,3 +42,4 @@ target/
 *.lock
 
 gesto-*/
+python/__pycache__/
