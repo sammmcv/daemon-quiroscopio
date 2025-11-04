@@ -43,3 +43,4 @@ target/
 
 gesto-*/
 python/__pycache__/
+gestos_auto_rust/

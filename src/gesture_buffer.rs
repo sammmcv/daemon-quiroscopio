@@ -4,19 +4,22 @@ use std::collections::VecDeque;
 const WINDOW_SIZE: usize = 64;
 const SENSORS: usize = 5;
 const CHANNELS: usize = 7;
+const CAPTURE_SIZE: usize = 200; // Buffer extendido para capturar gesto completo
 
 /// Buffer circular para acumular ventanas de 64 muestras
 pub struct GestureBuffer {
     buffer: VecDeque<SensorFrame>,
     window_size: usize,
+    max_buffer_size: usize,
 }
 
 impl GestureBuffer {
     /// Crea un nuevo buffer con tamaño de ventana especificado
     pub fn new() -> Self {
         Self {
-            buffer: VecDeque::with_capacity(WINDOW_SIZE * 2),
+            buffer: VecDeque::with_capacity(CAPTURE_SIZE),
             window_size: WINDOW_SIZE,
+            max_buffer_size: CAPTURE_SIZE,
         }
     }
 
@@ -24,8 +27,8 @@ impl GestureBuffer {
     pub fn push(&mut self, frame: SensorFrame) {
         self.buffer.push_back(frame);
         
-        // Mantener solo el doble del tamaño de ventana para permitir sliding
-        if self.buffer.len() > self.window_size * 2 {
+        // Mantener el buffer de captura extendido
+        if self.buffer.len() > self.max_buffer_size {
             self.buffer.pop_front();
         }
     }
@@ -71,9 +74,9 @@ impl GestureBuffer {
         Some(window)
     }
     
-    /// Calcula la magnitud del movimiento (aceleración) en la ventana
-    /// Retorna la desviación estándar promedio de la aceleración de todos los sensores
-    pub fn get_movement_magnitude(&self) -> f32 {
+    /// Calcula la energía de aceleración en una ventana (para detección de gestos)
+    /// Retorna la energía promedio de todos los sensores
+    pub fn get_energy(&self) -> f32 {
         if self.buffer.len() < 2 {
             return 0.0;
         }
@@ -84,38 +87,164 @@ impl GestureBuffer {
             0
         };
         
-        let mut total_variance = 0.0;
-        let mut sensor_count = 0;
+        let mut total_energy = 0.0;
+        let mut sample_count = 0;
         
-        // Calcular varianza de aceleración para cada sensor
-        for s in 0..SENSORS {
-            let mut acc_values: Vec<f32> = Vec::new();
-            
-            for frame in self.buffer.iter().skip(start_idx) {
+        // Calcular energía de aceleración para cada sensor
+        for frame in self.buffer.iter().skip(start_idx) {
+            for s in 0..SENSORS {
                 if let Some(sensor_data) = frame[s] {
-                    // Magnitud de aceleración: sqrt(ax^2 + ay^2 + az^2)
-                    let acc_mag = (sensor_data[0].powi(2) + 
-                                   sensor_data[1].powi(2) + 
-                                   sensor_data[2].powi(2)).sqrt();
-                    acc_values.push(acc_mag);
+                    // Energía: ax^2 + ay^2 + az^2
+                    let energy = sensor_data[0].powi(2) + 
+                                 sensor_data[1].powi(2) + 
+                                 sensor_data[2].powi(2);
+                    total_energy += energy;
+                    sample_count += 1;
                 }
-            }
-            
-            if acc_values.len() > 1 {
-                let mean = acc_values.iter().sum::<f32>() / acc_values.len() as f32;
-                let variance = acc_values.iter()
-                    .map(|&x| (x - mean).powi(2))
-                    .sum::<f32>() / acc_values.len() as f32;
-                total_variance += variance.sqrt(); // Desviación estándar
-                sensor_count += 1;
             }
         }
         
-        if sensor_count > 0 {
-            total_variance / sensor_count as f32
+        if sample_count > 0 {
+            total_energy / sample_count as f32
         } else {
             0.0
         }
+    }
+    
+    /// Detecta si hay un gesto completo en el buffer usando umbrales de energía
+    /// Retorna true si detectó inicio y fin de gesto
+    pub fn detect_gesture(&self, threshold_on: f32, threshold_off: f32) -> bool {
+        if self.buffer.len() < self.window_size {
+            return false;
+        }
+        
+        let mut in_gesture = false;
+        let mut gesture_started = false;
+        let mut gesture_ended = false;
+        
+        // Aplicar filtro pasa-altas simple (eliminar componente DC)
+        let mut last_values: Vec<[f32; 3]> = vec![[0.0; 3]; SENSORS];
+        let alpha = 0.99; // Factor de filtro pasa-altas
+        
+        for frame in self.buffer.iter() {
+            let mut frame_energy = 0.0;
+            let mut valid_sensors = 0;
+            
+            for s in 0..SENSORS {
+                if let Some(sensor_data) = frame[s] {
+                    // Aplicar filtro pasa-altas en aceleraciones
+                    let filtered = [
+                        alpha * (last_values[s][0] + sensor_data[0] - last_values[s][0]),
+                        alpha * (last_values[s][1] + sensor_data[1] - last_values[s][1]),
+                        alpha * (last_values[s][2] + sensor_data[2] - last_values[s][2]),
+                    ];
+                    
+                    last_values[s] = [sensor_data[0], sensor_data[1], sensor_data[2]];
+                    
+                    // Calcular energía filtrada
+                    frame_energy += filtered[0].powi(2) + filtered[1].powi(2) + filtered[2].powi(2);
+                    valid_sensors += 1;
+                }
+            }
+            
+            if valid_sensors > 0 {
+                frame_energy /= valid_sensors as f32;
+                
+                // Detectar inicio de gesto
+                if !in_gesture && frame_energy > threshold_on {
+                    in_gesture = true;
+                    gesture_started = true;
+                }
+                
+                // Detectar fin de gesto
+                if in_gesture && frame_energy < threshold_off {
+                    gesture_ended = true;
+                    break;
+                }
+            }
+        }
+        
+        gesture_started && gesture_ended
+    }
+    
+    /// Encuentra el pico de energía y extrae una ventana de 64 muestras centrada en él
+    /// Retorna la ventana centrada y el índice del pico
+    pub fn get_centered_window(&self) -> Option<([[[f32; CHANNELS]; SENSORS]; WINDOW_SIZE], usize)> {
+        if self.buffer.len() < self.window_size {
+            return None;
+        }
+        
+        // 1. Calcular energía para cada frame con filtro pasa-altas
+        let mut energies = Vec::with_capacity(self.buffer.len());
+        let mut last_values: Vec<[f32; 3]> = vec![[0.0; 3]; SENSORS];
+        let alpha = 0.99;
+        
+        for frame in self.buffer.iter() {
+            let mut frame_energy = 0.0;
+            let mut valid_sensors = 0;
+            
+            for s in 0..SENSORS {
+                if let Some(sensor_data) = frame[s] {
+                    // Aplicar filtro pasa-altas
+                    let filtered = [
+                        alpha * (last_values[s][0] + sensor_data[0] - last_values[s][0]),
+                        alpha * (last_values[s][1] + sensor_data[1] - last_values[s][1]),
+                        alpha * (last_values[s][2] + sensor_data[2] - last_values[s][2]),
+                    ];
+                    
+                    last_values[s] = [sensor_data[0], sensor_data[1], sensor_data[2]];
+                    
+                    frame_energy += filtered[0].powi(2) + filtered[1].powi(2) + filtered[2].powi(2);
+                    valid_sensors += 1;
+                }
+            }
+            
+            if valid_sensors > 0 {
+                energies.push(frame_energy / valid_sensors as f32);
+            } else {
+                energies.push(0.0);
+            }
+        }
+        
+        // 2. Encontrar el índice del pico máximo
+        let peak_idx = energies
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(idx, _)| idx)?;
+        
+        // 3. Calcular rango de extracción centrado en el pico
+        let half_window = self.window_size / 2;
+        let start_idx = if peak_idx >= half_window {
+            peak_idx - half_window
+        } else {
+            0
+        };
+        
+        let end_idx = start_idx + self.window_size;
+        
+        // Verificar que hay suficientes datos
+        if end_idx > self.buffer.len() {
+            return None;
+        }
+        
+        // 4. Extraer la ventana centrada
+        let mut window = [[[0.0f32; CHANNELS]; SENSORS]; WINDOW_SIZE];
+        let mut last_known = [[0.0f32; CHANNELS]; SENSORS];
+        
+        for (w_idx, frame) in self.buffer.iter().skip(start_idx).take(self.window_size).enumerate() {
+            for s in 0..SENSORS {
+                if let Some(sensor_data) = frame[s] {
+                    window[w_idx][s].copy_from_slice(&sensor_data);
+                    last_known[s].copy_from_slice(&sensor_data);
+                } else {
+                    // Usar último valor conocido si el sensor no está presente
+                    window[w_idx][s].copy_from_slice(&last_known[s]);
+                }
+            }
+        }
+        
+        Some((window, peak_idx))
     }
 
     /// Obtiene el número de frames acumulados
@@ -126,6 +255,33 @@ impl GestureBuffer {
     /// Limpia el buffer
     pub fn clear(&mut self) {
         self.buffer.clear();
+    }
+    
+    /// Exporta el buffer completo a formato CSV (igual que los archivos de entrenamiento)
+    /// Retorna String con formato: sample,sensor,ax,ay,az,w,i,j,k
+    pub fn to_csv(&self) -> String {
+        let mut csv = String::from("sample,sensor,ax,ay,az,w,i,j,k\n");
+        
+        for (sample_idx, frame) in self.buffer.iter().enumerate() {
+            for sensor_id in 0..SENSORS {
+                if let Some(sensor_data) = frame[sensor_id] {
+                    csv.push_str(&format!(
+                        "{},{},{},{},{},{},{},{},{}\n",
+                        sample_idx,
+                        sensor_id,
+                        sensor_data[0], // ax
+                        sensor_data[1], // ay
+                        sensor_data[2], // az
+                        sensor_data[3], // w (quaternion)
+                        sensor_data[4], // i
+                        sensor_data[5], // j
+                        sensor_data[6]  // k
+                    ));
+                }
+            }
+        }
+        
+        csv
     }
 }
 
