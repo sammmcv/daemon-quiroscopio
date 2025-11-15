@@ -36,9 +36,6 @@ target/
 *.log
 *.tmp
 *.sh
-*.onnx
-*.json
-*.joblib
 *.lock
 
 gesto-*/

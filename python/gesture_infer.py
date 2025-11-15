@@ -141,6 +141,53 @@ class GestureClassifier:
             return "desconocido", conf
 
         return label, conf
+    
+    def predict_all_scores(self, window_64x5x7: np.ndarray) -> Tuple[str, float, dict]:
+        """
+        Predice el gesto y devuelve scores para TODAS las clases.
+        Retorna: (label, conf, all_scores) donde all_scores = {"gesto-drop": 0.95, ...}
+        """
+        # 1) Gate por "hay movimiento"
+        ms = motion_score(window_64x5x7)
+        if ms < MOTION_TAU:
+            return "desconocido", 0.0, {}
+
+        # 2) Extraer features
+        X = self._pre(window_64x5x7)
+        
+        # 3) Predecir clase principal
+        y_idx = int(self.pipeline.predict(X)[0])
+        label = self.idx2label[y_idx]
+
+        # 4) Obtener scores para todas las clases
+        all_scores = {}
+        conf = 1.0
+        
+        try:
+            # Para SVM multiclase (OvR), decision_function devuelve scores por clase
+            df = self.pipeline.decision_function(X)[0]  # shape: (n_classes,)
+            
+            # Convertir scores a pseudo-probabilidades con softmax (para mostrar distribución)
+            exp_scores = np.exp(df - np.max(df))  # estabilidad numérica
+            probs = exp_scores / np.sum(exp_scores)
+            
+            for i, score in enumerate(probs):
+                all_scores[self.idx2label[i]] = float(score)
+            
+            # Confianza del gesto predicho usando la misma lógica que predict()
+            # (sigmoide del score máximo, igual que antes)
+            m = float(np.max(np.atleast_1d(df)))
+            conf = 1.0 / (1.0 + math.exp(-m))
+        except Exception:
+            # Fallback si decision_function no está disponible
+            conf = 1.0
+            all_scores = {label: conf}
+
+        # 5) Gate por confianza mínima
+        if conf < CONF_TAU:
+            return "desconocido", conf, all_scores
+
+        return label, conf, all_scores
 
 # Helpers CLI para probar con CSV/NPZ
 def load_window_from_csv(path: Path) -> np.ndarray:

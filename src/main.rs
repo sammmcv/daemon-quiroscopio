@@ -58,6 +58,42 @@ fn predict_window(
     Ok((label, conf))
 }
 
+/// Predice un gesto y devuelve TODAS las confianzas por clase
+fn predict_all_scores(
+    py: Python<'_>,
+    clf: &PyAny,
+    window: &[[[f32; CHANNELS]; SENSORS]; WINDOW_SIZE],
+) -> Result<(String, f32, std::collections::HashMap<String, f32>)> {
+    use std::collections::HashMap;
+    
+    // Convertir ventana Rust a numpy array Python
+    let np_window = PyArray3::from_array(py, &numpy::ndarray::Array3::from_shape_fn(
+        (WINDOW_SIZE, SENSORS, CHANNELS),
+        |(t, s, c)| window[t][s][c],
+    ));
+    
+    // Llamar al método predict_all_scores del clasificador
+    let result = clf.call_method1("predict_all_scores", (np_window,))?;
+    
+    // Extraer label, confidence, y all_scores dict
+    let label: String = result.get_item(0)?.extract()?;
+    let conf: f32 = result.get_item(1)?.extract()?;
+    let scores_dict = result.get_item(2)?;
+    
+    let mut all_scores = HashMap::new();
+    
+    // Convertir dict Python a HashMap Rust
+    if let Ok(dict) = scores_dict.downcast::<PyDict>() {
+        for (key, value) in dict.iter() {
+            if let (Ok(gesture_name), Ok(score)) = (key.extract::<String>(), value.extract::<f32>()) {
+                all_scores.insert(gesture_name, score);
+            }
+        }
+    }
+    
+    Ok((label, conf, all_scores))
+}
+
 
 
 fn main() -> Result<()> {
@@ -310,8 +346,8 @@ fn process_gesture_folders() -> Result<()> {
                 
                 match load_window_from_csv(csv_path) {
                     Ok(window) => {
-                        match predict_window(py, clf, &window) {
-                            Ok((label, conf)) => {
+                        match predict_all_scores(py, clf, &window) {
+                            Ok((label, conf, all_scores)) => {
                                 confidences.push(conf);
                                 
                                 let is_correct = label == expected_label;
@@ -328,7 +364,25 @@ fn process_gesture_folders() -> Result<()> {
                                     "❌"
                                 };
                                 
+                                // Mostrar predicción principal
                                 println!("  {} {} → {} ({:.1}%)", status, file_name, label, conf * 100.0);
+                                
+                                // Mostrar top 3 confianzas (excluyendo la predicción principal)
+                                if !all_scores.is_empty() {
+                                    let mut scores_vec: Vec<(String, f32)> = all_scores
+                                        .into_iter()
+                                        .filter(|(name, _)| name != &label)
+                                        .collect();
+                                    scores_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                                    
+                                    let top_n = scores_vec.iter().take(3);
+                                    print!("     └─ Otros: ");
+                                    for (i, (name, score)) in top_n.enumerate() {
+                                        if i > 0 { print!(", "); }
+                                        print!("{}: {:.1}%", name, score * 100.0);
+                                    }
+                                    println!();
+                                }
                             }
                             Err(e) => {
                                 println!("  ❌ {} → Error: {}", file_name, e);

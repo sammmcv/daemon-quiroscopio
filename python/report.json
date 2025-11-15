@@ -1,0 +1,12 @@
+{
+  "best_model": "svm_poly",
+  "best_params": {
+    "clf__C": 3,
+    "clf__degree": 3
+  },
+  "cv_base_f1_macro": 0.9972541881871038,
+  "ext_accuracy": 0.954228855721393,
+  "ext_f1_macro": 0.9471717515839403,
+  "n_base": 2349,
+  "n_external": 1005
+}

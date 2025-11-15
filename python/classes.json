@@ -1,0 +1,10 @@
+{
+  "index_to_class": {
+    "0": "gesto-zoom-in",
+    "1": "gesto-zoom-out",
+    "2": "gesto-grab",
+    "3": "gesto-drop",
+    "4": "gesto-slide-izquierda",
+    "5": "gesto-slide-derecha"
+  }
+}
