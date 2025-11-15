@@ -18,9 +18,10 @@ Ejemplo:
 mod ble;
 mod gesture_buffer;
 mod gesture_extractor;
+mod hid;
 
 use anyhow::Result;
-use crossbeam_channel::{bounded, select};
+use crossbeam_channel::{bounded, select, unbounded};
 use numpy::PyArray3;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -30,6 +31,7 @@ use std::time::Duration;
 
 use ble::{SensorFrame, start_ble_receiver};
 use gesture_extractor::{GestureExtractor, ExtractorParams};
+use hid::{HidOutput, GestureAction};
 
 const WINDOW_SIZE: usize = 64;
 const SENSORS: usize = 5;
@@ -94,6 +96,19 @@ fn predict_all_scores(
     Ok((label, conf, all_scores))
 }
 
+/// Conversión string → enum GestureAction
+fn map_label_to_action(label: &str) -> Option<GestureAction> {
+    use GestureAction::*;
+    match label {
+        "gesto-slide-derecha" => Some(SlideDer),
+        "gesto-slide-izquierda" => Some(SlideIzq),
+        "gesto-zoom-in" => Some(ZoomIn),
+        "gesto-zoom-out" => Some(ZoomOut),
+        "gesto-grab" => Some(Grab),
+        "gesto-drop" => Some(Drop),
+        _ => None,
+    }
+}
 
 
 fn main() -> Result<()> {
@@ -103,9 +118,17 @@ fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     
     if args.len() < 2 {
-        // Modo carpetas: procesar CSVs en gesto-*
-        println!("🔧 Modo: Procesamiento de carpetas gesto-*\n");
-        return process_gesture_folders();
+        // Modo DEBUG: ejecutar con teclado interactivo
+        println!("🔧 Modo: DEBUG - Teclado Interactivo\n");
+        println!("Presiona teclas para simular gestos:");
+        println!("  d → gesto-drop");
+        println!("  g → gesto-grab");
+        println!("  r → gesto-slide-derecha");
+        println!("  l → gesto-slide-izquierda");
+        println!("  i → gesto-zoom-in");
+        println!("  o → gesto-zoom-out");
+        println!("  q → salir\n");
+        return debug_mode();
     }
     
     let target_mac = &args[1];
@@ -243,6 +266,189 @@ fn main() -> Result<()> {
         println!("   Frames totales: {}", frames_received);
         
         Ok(())
+    })
+}
+
+/// Modo DEBUG: lee teclas y procesa CSVs correspondientes con HID
+fn debug_mode() -> Result<()> {
+    use std::fs;
+    use std::path::PathBuf;
+    use evdev::{Device, InputEventKind, Key};
+    
+    println!("🔍 Buscando teclado...");
+    
+    // Buscar dispositivo de teclado
+    let mut keyboard_device: Option<Device> = None;
+    
+    for entry in fs::read_dir("/dev/input")? {
+        if let Ok(entry) = entry {
+            let path = entry.path();
+            if let Some(name) = path.file_name() {
+                if name.to_string_lossy().starts_with("event") {
+                    if let Ok(device) = Device::open(&path) {
+                        if let Some(dev_name) = device.name() {
+                            // Buscar dispositivos que sean teclados
+                            if dev_name.to_lowercase().contains("keyboard") 
+                                || dev_name.to_lowercase().contains("at translated") {
+                                println!("✅ Teclado encontrado: {} ({})", dev_name, path.display());
+                                keyboard_device = Some(device);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    let mut device = keyboard_device.ok_or_else(|| {
+        anyhow::anyhow!("No se encontró ningún dispositivo de teclado en /dev/input")
+    })?;
+    
+    println!("✅ Captura de teclado global activada (sin necesidad de foco en terminal)\n");
+    
+    // Inicializar clasificador Python
+    Python::with_gil(|py| -> Result<()> {
+        let sys = py.import("sys")?;
+        let sys_path: &pyo3::types::PyList = sys.getattr("path")?.downcast().unwrap();
+        sys_path.insert(0, "python")?;
+        
+        let gi = py.import("gesture_infer")?;
+        let cls = gi.getattr("GestureClassifier")?;
+        
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("artifacts_dir", "python")?;
+        kwargs.set_item("try_calibrated", true)?;
+        
+        let clf = cls.call((), Some(kwargs))?;
+        println!("✅ Clasificador Python cargado");
+        
+        // Canal para GestureAction
+        let (tx_gesture, rx_gesture) = unbounded::<GestureAction>();
+        
+        // Hilo HID dedicado
+        std::thread::spawn(move || {
+            let mut hid = match HidOutput::new() {
+                Ok(h) => {
+                    println!("✅ HID inicializado (/dev/uinput)");
+                    h
+                }
+                Err(e) => {
+                    eprintln!("❌ No se pudo inicializar HID: {}", e);
+                    eprintln!("   Ejecuta con: sudo modprobe uinput");
+                    eprintln!("   O ejecuta el binario con sudo");
+                    return;
+                }
+            };
+            
+            while let Ok(action) = rx_gesture.recv() {
+                println!("🎮 Enviando acción HID: {:?}", action);
+                if let Err(e) = hid.send(action) {
+                    eprintln!("❌ Error enviando gesto HID {:?}: {}", action, e);
+                }
+            }
+        });
+        
+        println!("✅ Sistema listo\n");
+        
+        // Mapeo tecla → carpeta
+        let key_to_folder: std::collections::HashMap<Key, (&str, &str)> = [
+            (Key::KEY_D, ("gesto-drop", "d")),
+            (Key::KEY_G, ("gesto-grab", "g")),
+            (Key::KEY_R, ("gesto-slide-derecha", "r")),
+            (Key::KEY_L, ("gesto-slide-izquierda", "l")),
+            (Key::KEY_I, ("gesto-zoom-in", "i")),
+            (Key::KEY_O, ("gesto-zoom-out", "o")),
+        ].iter().cloned().collect();
+        
+        println!("🎧 Escuchando teclas globales en segundo plano...");
+        println!("   Presiona Ctrl+C para salir\n");
+        
+        // Loop de eventos
+        loop {
+            for ev in device.fetch_events()? {
+                if let InputEventKind::Key(key) = ev.kind() {
+                    // Solo procesar cuando se presiona la tecla (value == 1)
+                    if ev.value() == 1 {
+                        // Verificar si es Q para salir
+                        if key == Key::KEY_Q {
+                            println!("\n👋 Saliendo...");
+                            return Ok(());
+                        }
+                        
+                        if let Some((folder_name, key_char)) = key_to_folder.get(&key) {
+                            println!("\n🔑 Tecla presionada: '{}'", key_char);
+                            println!("📂 Buscando CSV en: {}/", folder_name);
+                            
+                            // Buscar un CSV aleatorio en la carpeta
+                            let folder_path = PathBuf::from(folder_name);
+                            
+                            if !folder_path.exists() {
+                                eprintln!("❌ Carpeta no existe: {}", folder_name);
+                                continue;
+                            }
+                            
+                            let csv_files: Vec<PathBuf> = fs::read_dir(&folder_path)?
+                                .filter_map(|entry| entry.ok())
+                                .filter(|entry| {
+                                    let path = entry.path();
+                                    path.extension()
+                                        .and_then(|ext| ext.to_str())
+                                        .map(|ext| ext == "csv")
+                                        .unwrap_or(false)
+                                })
+                                .map(|entry| entry.path())
+                                .collect();
+                            
+                            if csv_files.is_empty() {
+                                eprintln!("❌ No hay archivos CSV en {}", folder_name);
+                                continue;
+                            }
+                            
+                            // Tomar el primer CSV
+                            let csv_path = &csv_files[0];
+                            let file_name = csv_path.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown.csv");
+                            
+                            println!("📄 Archivo: {}", file_name);
+                            
+                            // Cargar ventana desde CSV
+                            match load_window_from_csv(csv_path) {
+                                Ok(window) => {
+                                    // Predecir gesto
+                                    match predict_window(py, clf, &window) {
+                                        Ok((label, conf)) => {
+                                            println!("🎯 Predicción: {} ({:.1}%)", label, conf * 100.0);
+                                            
+                                            // Convertir a GestureAction y enviar a HID
+                                            if let Some(action) = map_label_to_action(&label) {
+                                                if conf >= CONFIDENCE_THRESHOLD {
+                                                    let _ = tx_gesture.send(action);
+                                                } else {
+                                                    println!("⚠️  Confianza baja, no se envía HID");
+                                                }
+                                            } else {
+                                                println!("⚠️  Gesto no mapeado a acción HID: {}", label);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!("❌ Error en predicción: {}", e);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("❌ Error cargando CSV: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Pequeña pausa para no consumir CPU
+            std::thread::sleep(Duration::from_millis(10));
+        }
     })
 }
 
