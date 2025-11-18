@@ -5,23 +5,22 @@ Sistema de reconocimiento de gestos en tiempo real que utiliza sensores IMU cone
 ## Estructura del proyecto
 
 ```
-├── src/                       # Código fuente Rust
-│   ├── main.rs                # Aplicación principal
-│   ├── ble.rs                 # Módulo de comunicación BLE
-│   ├── gesture_buffer.rs      # Gestión de buffers de datos
-│   ├── gesture_extractor.rs   # Extracción de características
-│   └── hid.rs                 # Interfaz de salida HID
-├── python/                    # Pipeline de clasificación
-│   ├── gesture_infer.py       # Script de inferencia
+├── src/                      # Código fuente Rust
+│   ├── main.rs                 # Aplicación principal
+│   ├── ble.rs                  # Módulo de comunicación BLE
+│   ├── gesture_buffer.rs       # Gestión de buffers de datos
+│   ├── gesture_extractor.rs    # Extracción de características
+│   └── hid.rs                  # Interfaz de salida HID
+├── python/                   # Pipeline de clasificación
+│   ├── gesture_infer.py        # Script de inferencia
 │   ├── best_pipeline__*.joblib # Modelos entrenados
-│   └── classes.json           # Etiquetas de gestos
-├── gestos/                    # Datos de entrenamiento organizados por gesto
-│   ├── gesto-drop/
-│   ├── gesto-grab/
-│   ├── gesto-slide-derecha/
-│   ├── gesto-slide-izquierda/
-│   ├── gesto-zoom-in/
-│   └── gesto-zoom-out/
+│   └── classes.json            # Etiquetas de gestos
+├── gesto-drop/               # Datos de entrenamiento organizados por gesto
+├── gesto-grab/
+├── gesto-slide-derecha/
+├── gesto-slide-izquierda/
+├── gesto-zoom-in/
+├── gesto-zoom-out/
 ├── Cargo.toml                 # Configuración del proyecto Rust
 └── README.md
 ```
