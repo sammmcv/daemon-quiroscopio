@@ -2,6 +2,7 @@ use std::time::Duration;
 use uinput::device::Device;
 use uinput::event::keyboard;
 use uinput::event::controller;
+use uinput::event::relative;
 
 #[derive(Debug, Clone, Copy)]
 pub enum GestureAction {
@@ -23,6 +24,8 @@ impl HidOutput {
             .name("ble-gesture-hid")?
             .event(uinput::event::Keyboard::All)?
             .event(uinput::event::Controller::Mouse(controller::Mouse::Left))?
+            .event(uinput::event::Relative::Position(relative::Position::X))?
+            .event(uinput::event::Relative::Position(relative::Position::Y))?
             .create()?;
 
         Ok(HidOutput { dev })
@@ -76,6 +79,13 @@ impl HidOutput {
 
     fn drop(&mut self) -> Result<(), uinput::Error> {
         self.dev.release(&controller::Controller::Mouse(controller::Mouse::Left))?;
+        self.sync()
+    }
+
+    /// Mueve el cursor en relación a su posición actual (dx, dy en píxeles)
+    pub fn move_cursor(&mut self, dx: i32, dy: i32) -> Result<(), uinput::Error> {
+        self.dev.send(relative::Position::X, dx)?;
+        self.dev.send(relative::Position::Y, dy)?;
         self.sync()
     }
 

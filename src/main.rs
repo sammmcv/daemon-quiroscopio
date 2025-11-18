@@ -42,6 +42,41 @@ const SENSORS: usize = 5;
 const CHANNELS: usize = 7;
 const CONFIDENCE_THRESHOLD: f32 = 0.70; // Umbral de confianza mínima para SVM (igual que C++)
 
+/// Convierte el quaternion del sensor 0 en movimiento de cursor (dx, dy).
+/// Usa pitch (inclinación adelante/atrás) y roll (inclinación izq/der) para controlar el cursor.
+fn orientation_to_cursor_movement(sensor_data: &[f32; CHANNELS]) -> (i32, i32) {
+    // sensor_data = [ax, ay, az, w, i, j, k]
+    let w = sensor_data[3];
+    let x = sensor_data[4]; // i
+    let y = sensor_data[5]; // j
+    let z = sensor_data[6]; // k
+
+    // Calcular pitch (rotación en eje Y, hacia adelante/atrás)
+    // pitch = atan2(2(wy + xz), 1 - 2(y² + z²))
+    let pitch = (2.0 * (w * y + x * z)).atan2(1.0 - 2.0 * (y * y + z * z));
+    
+    // Calcular roll (rotación en eje X, hacia los lados)
+    // roll = atan2(2(wx + yz), 1 - 2(x² + y²))
+    let roll = (2.0 * (w * x + y * z)).atan2(1.0 - 2.0 * (x * x + y * y));
+
+    // Mapear ángulos a movimiento de cursor
+    // pitch > 0 → mirar abajo → cursor hacia abajo (dy positivo)
+    // roll > 0 → inclinar derecha → cursor hacia derecha (dx positivo)
+    
+    // Sensibilidad: ~20 grados = 10 píxeles de movimiento
+    let sensitivity = 0.5; // píxeles por grado (ajustable)
+    
+    let dx = (roll.to_degrees() * sensitivity) as i32;
+    let dy = (pitch.to_degrees() * sensitivity) as i32;
+
+    // Limitar movimiento máximo por frame
+    let max_delta = 15;
+    let dx = dx.clamp(-max_delta, max_delta);
+    let dy = dy.clamp(-max_delta, max_delta);
+
+    (dx, dy)
+}
+
 /// Determina dirección del slide al estilo C++ usando az del sensor 1 en la
 /// ventana central. Devuelve Some(true)=derecha, Some(false)=izquierda,
 /// None=indefinido.
@@ -301,6 +336,15 @@ fn main() -> Result<()> {
         
         // ===== Canal y hilo HID para enviar acciones =====
         let (tx_gesture, rx_gesture) = unbounded::<GestureAction>();
+        let (tx_cursor, rx_cursor) = unbounded::<(i32, i32)>(); // Canal para movimiento de cursor (dx, dy)
+        
+        // Estado compartido para control de cursor
+        use std::sync::{Arc, Mutex};
+        let cursor_mode_active = Arc::new(Mutex::new(false));
+        let cursor_mode_clone = Arc::clone(&cursor_mode_active);
+        let grab_was_active = Arc::new(Mutex::new(false));
+        let grab_was_active_clone = Arc::clone(&grab_was_active);
+        
         std::thread::spawn(move || {
             let mut hid = match HidOutput::new() {
                 Ok(h) => {
@@ -313,9 +357,53 @@ fn main() -> Result<()> {
                     return;
                 }
             };
-            while let Ok(action) = rx_gesture.recv() {
-                if let Err(e) = hid.send(action) {
-                    eprintln!("❌ Error enviando gesto HID {:?}: {}", action, e);
+            
+            // Loop de procesamiento de comandos HID
+            loop {
+                select! {
+                    recv(rx_gesture) -> action_result => {
+                        if let Ok(action) = action_result {
+                            // Lógica de activación/desactivación de modo cursor
+                            match action {
+                                GestureAction::Grab => {
+                                    *grab_was_active_clone.lock().unwrap() = true;
+                                }
+                                GestureAction::Drop => {
+                                    let grab_active = *grab_was_active_clone.lock().unwrap();
+                                    if !grab_active {
+                                        // Drop sin Grab previo -> toggle cursor mode
+                                        let mut cursor_mode = cursor_mode_clone.lock().unwrap();
+                                        *cursor_mode = !*cursor_mode;
+                                        let new_state = *cursor_mode;
+                                        drop(cursor_mode); // liberar lock
+                                        
+                                        if new_state {
+                                            println!("🖱️  Modo control de cursor ACTIVADO (Drop sin Grab previo)");
+                                        } else {
+                                            println!("🖱️  Modo control de cursor DESACTIVADO (segundo Drop)");
+                                        }
+                                        continue; // No enviar evento Drop al HID
+                                    } else {
+                                        // Drop con Grab previo -> enviar Drop normal
+                                        *grab_was_active_clone.lock().unwrap() = false;
+                                    }
+                                }
+                                _ => {}
+                            }
+                            
+                            if let Err(e) = hid.send(action) {
+                                eprintln!("❌ Error enviando gesto HID {:?}: {}", action, e);
+                            }
+                        }
+                    }
+                    recv(rx_cursor) -> cursor_result => {
+                        if let Ok((dx, dy)) = cursor_result {
+                            // Enviar movimiento de cursor
+                            if let Err(e) = hid.move_cursor(dx, dy) {
+                                eprintln!("❌ Error moviendo cursor: {}", e);
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -332,7 +420,6 @@ fn main() -> Result<()> {
         });
         
         // Cola thread-safe para gestos detectados (5 ventanas por gesto)
-        use std::sync::{Arc, Mutex};
         let pending_gestures: Arc<Mutex<VecDeque<[Vec<SensorFrame>; 5]>>> = Arc::new(Mutex::new(VecDeque::new()));
         let pending_gestures_clone = Arc::clone(&pending_gestures);
         
@@ -362,6 +449,18 @@ fn main() -> Result<()> {
                     match msg {
                         Ok(frame) => {
                             frames_received += 1;
+                            
+                            // ===== Control de cursor si está activo =====
+                            if *cursor_mode_active.lock().unwrap() {
+                                // Usar sensor 0 para controlar cursor
+                                if let Some(sensor0_data) = &frame[0] {
+                                    let (dx, dy) = orientation_to_cursor_movement(sensor0_data);
+                                    // Solo enviar si hay movimiento significativo
+                                    if dx.abs() > 1 || dy.abs() > 1 {
+                                        let _ = tx_cursor.send((dx, dy));
+                                    }
+                                }
+                            }
                             
                             // ===== Alimentar el GestureExtractor automático =====
                             extractor.feed(frame);
