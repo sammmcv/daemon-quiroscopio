@@ -1,33 +1,34 @@
 # Sistema de Reconocimiento de Gestos BLE
 
-Sistema de reconocimiento de gestos en tiempo real que utiliza sensores IMU conectados por Bluetooth Low Energy (BLE). Desarrollado en Rust para el procesamiento de datos en tiempo real, con integración de modelos de Machine Learning en Python para la clasificación de gestos.
+Sistema de reconocimiento de gestos que utiliza sensores IMU conectados por Bluetooth Low Energy (BLE). Desarrollado en Rust para el procesamiento de datos, con integración de modelos de Machine Learning en Python para la clasificación de gestos.
 
 ## Estructura del proyecto
 
 ```
-├── src/                      # Código fuente Rust
-│   ├── main.rs                 # Aplicación principal
-│   ├── ble.rs                  # Módulo de comunicación BLE
-│   ├── gesture_buffer.rs       # Gestión de buffers de datos
-│   ├── gesture_extractor.rs    # Extracción de características
-│   └── hid.rs                  # Interfaz de salida HID
-├── python/                   # Pipeline de clasificación
-│   ├── gesture_infer.py        # Script de inferencia
+├── src/                       # Código fuente Rust
+│   ├── main.rs                # Aplicación principal
+│   ├── ble.rs                 # Módulo de comunicación BLE
+│   ├── gesture_buffer.rs      # Gestión de buffers de datos
+│   ├── gesture_extractor.rs   # Extracción de características
+│   └── hid.rs                 # Interfaz de salida HID
+├── python/                    # Pipeline de clasificación
+│   ├── gesture_infer.py       # Script de inferencia
 │   ├── best_pipeline__*.joblib # Modelos entrenados
-│   └── classes.json            # Etiquetas de gestos
-├── gesto-drop/               # Datos de entrenamiento organizados por gesto
-├── gesto-grab/
-├── gesto-slide-derecha/
-├── gesto-slide-izquierda/
-├── gesto-zoom-in/
-├── gesto-zoom-out/
+│   └── classes.json           # Etiquetas de gestos
+├── gestos/                    # Datos de entrenamiento organizados por gesto
+│   ├── gesto-drop/
+│   ├── gesto-grab/
+│   ├── gesto-slide-derecha/
+│   ├── gesto-slide-izquierda/
+│   ├── gesto-zoom-in/
+│   └── gesto-zoom-out/
 ├── Cargo.toml                 # Configuración del proyecto Rust
 └── README.md
 ```
 
 ## Flujo de ejecución
 
-1. **Captura BLE**: Conexión a sensores IMU y recepción de datos en tiempo real
+1. **Captura BLE**: Conexión a sensores IMU y recepción de datos
 2. **Procesamiento**: Acumulación de datos en ventanas de tiempo y extracción de características
 3. **Clasificación**: Inferencia de gestos mediante modelos de ML (integración PyO3)
 4. **Salida**: Generación de eventos de entrada del sistema o visualización de resultados
@@ -62,7 +63,7 @@ cargo build --release
 
 ## Uso
 
-### Reconocimiento en tiempo real
+### Reconocimiento en tiempo continuo
 ```bash
 # Ejecutar con dirección MAC del dispositivo BLE
 ./target/release/onnx-predictor <MAC_ADDRESS>
@@ -89,12 +90,12 @@ Consulta los archivos de código fuente para modificar estos parámetros.
 
 ## Características principales
 
-- **Procesamiento en tiempo real**: Captura y análisis continuo de datos IMU
+- **Procesamiento continuo**: Captura y análisis continuo de datos IMU
 - **Integración Rust-Python**: Combinación de rendimiento de Rust con ecosistema ML de Python
 - **Múltiples sensores**: Soporte para configuraciones multi-sensor
 - **Estabilización de predicciones**: Sistema de votación para reducir falsos positivos
 - **Interfaz HID**: Generación de eventos de entrada del sistema
-- **Formato flexible**: Capacidad de procesar datos en tiempo real o desde archivos
+- **Formato flexible**: Capacidad de procesar datos desde dispositivos BLE o archivos CSV
 
 ## Gestos soportados
 
