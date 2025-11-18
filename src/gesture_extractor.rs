@@ -71,8 +71,9 @@ pub struct GestureExtractor {
     /// Para tener contexto antes Y después del pico
     buffer: VecDeque<ExtractorFrame>,
     
-    /// Callback que se ejecuta cuando se detecta un gesto
-    callback: Option<Box<dyn FnMut(&[ExtractorFrame]) + Send>>,
+    /// Callback que se ejecuta cuando se detecta un gesto: entrega 5 ventanas
+    /// con offsets [-20, -10, 0, +10, +20] para votación
+    callback: Option<Box<dyn FnMut(&[Vec<ExtractorFrame>; 5]) + Send>>,
 }
 
 impl GestureExtractor {
@@ -98,10 +99,10 @@ impl GestureExtractor {
     }
     
     /// Establece el callback que se ejecutará cuando se detecte un gesto
-    /// El callback recibe la ventana de 64 frames centrada en el pico
+    /// El callback recibe 5 ventanas para votación con offsets [-20,-10,0,+10,+20]
     pub fn set_callback<F>(&mut self, callback: F)
     where
-        F: FnMut(&[ExtractorFrame]) + Send + 'static,
+        F: FnMut(&[Vec<ExtractorFrame>; 5]) + Send + 'static,
     {
         self.callback = Some(Box::new(callback));
     }
@@ -192,8 +193,8 @@ impl GestureExtractor {
         max
     }
     
-    /// Guarda la captura actual: busca el pico, extrae ventana centrada,
-    /// llama al callback y escribe CSV
+    /// Guarda la captura actual: busca el pico, extrae 5 ventanas alrededor
+    /// del pico, llama al callback y escribe CSV de la ventana centrada
     fn save_current_capture(&mut self) {
         if self.buffer.is_empty() {
             return;
@@ -211,38 +212,39 @@ impl GestureExtractor {
             }
         }
         
-        // 2) Construir ventana de L frames centrada en peak_idx
+        // 2) Construir 5 ventanas de L frames con offsets [-20, -10, 0, +10, +20]
         let l = self.params.fixed_len;
         let half = l / 2;
-        
-        // Rango deseado: [peak_idx - half, peak_idx + half)
-        let start_idx = peak_idx as i32 - half as i32;
-        
-        let mut out = Vec::with_capacity(l);
-        
-        for t in 0..l {
-            let src_idx = start_idx + t as i32;
-            
-            // Tomar datos reales de buffer_ si están disponibles
-            let frame = if src_idx >= 0 && (src_idx as usize) < self.buffer.len() {
-                self.buffer[src_idx as usize]
-            } else if src_idx < 0 {
-                // Antes del inicio: usar el primer frame del buffer
-                self.buffer[0]
-            } else {
-                // Después del final: usar el último frame del buffer
-                *self.buffer.back().unwrap()
-            };
-            
-            out.push(frame);
+        let offsets = [-20i32, -10, 0, 10, 20];
+        let mut windows: [Vec<ExtractorFrame>; 5] = [
+            Vec::with_capacity(l),
+            Vec::with_capacity(l),
+            Vec::with_capacity(l),
+            Vec::with_capacity(l),
+            Vec::with_capacity(l),
+        ];
+
+        for (widx, off) in offsets.iter().enumerate() {
+            let start_idx = peak_idx as i32 - half as i32 + off;
+            for t in 0..l {
+                let src_idx = start_idx + t as i32;
+                let frame = if src_idx >= 0 && (src_idx as usize) < self.buffer.len() {
+                    self.buffer[src_idx as usize]
+                } else if src_idx < 0 {
+                    self.buffer[0]
+                } else {
+                    *self.buffer.back().unwrap()
+                };
+                windows[widx].push(frame);
+            }
         }
         
-        // 3) Notificar al callback con la ventana extraída
+        // 3) Notificar al callback con las 5 ventanas
         if let Some(ref mut callback) = self.callback {
-            callback(&out);
+            callback(&windows);
         }
         
-        // 4) Escribir CSV
+        // 4) Escribir CSV de la ventana centrada (widx=2)
         let filename = format!(
             "{}/{}_{:05}.csv",
             self.params.out_dir,
@@ -252,7 +254,7 @@ impl GestureExtractor {
         
         self.file_idx += 1;
         
-        if let Err(e) = self.write_csv(&filename, &out) {
+        if let Err(e) = self.write_csv(&filename, &windows[2]) {
             eprintln!("Error escribiendo CSV {}: {}", filename, e);
         }
     }
@@ -265,7 +267,7 @@ impl GestureExtractor {
         writeln!(file, "sample,sensor,ax,ay,az,w,i,j,k")?;
         
         // Escribir datos
-        for (t, frame) in window.iter().enumerate() {
+    for (t, frame) in window.iter().enumerate() {
             for (s, sensor_opt) in frame.iter().enumerate() {
                 if let Some(sensor_data) = sensor_opt {
                     // sensor_data = [ax, ay, az, qw, qx, qy, qz]

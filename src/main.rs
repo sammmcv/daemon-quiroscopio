@@ -13,6 +13,10 @@ cargo build --release
 
 Ejemplo:
 ./target/release/onnx-predictor 28:CD:C1:08:37:69
+
+para debug con teclado:
+sg input -c './target/debug/onnx-predictor'
+
 */
 
 mod ble;
@@ -37,6 +41,126 @@ const WINDOW_SIZE: usize = 64;
 const SENSORS: usize = 5;
 const CHANNELS: usize = 7;
 const CONFIDENCE_THRESHOLD: f32 = 0.70; // Umbral de confianza mínima para SVM (igual que C++)
+
+/// Determina dirección del slide al estilo C++ usando az del sensor 1 en la
+/// ventana central. Devuelve Some(true)=derecha, Some(false)=izquierda,
+/// None=indefinido.
+fn slide_direction_cpp_style(
+    window: &[[[f32; CHANNELS]; SENSORS]; WINDOW_SIZE],
+) -> Option<(bool, String)> {
+    const SENSOR: usize = 1; // igual que C++
+    const AZ: usize = 2; // componente az
+
+    // 1) Extraer serie az
+    let mut az_series = [0.0f32; WINDOW_SIZE];
+    for t in 0..WINDOW_SIZE {
+        az_series[t] = window[t][SENSOR][AZ];
+    }
+
+    // 2) Buscar max/min ignorando extremos (5..T-5)
+    let mut max_val = -1e9f32;
+    let mut min_val = 1e9f32;
+    let mut idx_max: i32 = -1;
+    let mut idx_min: i32 = -1;
+
+    if WINDOW_SIZE <= 10 {
+        return None;
+    }
+
+    for t in 5..(WINDOW_SIZE - 5) {
+        let v = az_series[t];
+        if v > max_val {
+            max_val = v;
+            idx_max = t as i32;
+        }
+        if v < min_val {
+            min_val = v;
+            idx_min = t as i32;
+        }
+    }
+
+    if idx_max < 0 || idx_min < 0 {
+        return None;
+    }
+
+    let magnitud_max = max_val.abs();
+    let magnitud_min = min_val.abs();
+
+    // 3) Decidir dirección
+    let mut direccion = "DESCONOCIDA".to_string();
+    let mut patron_info = String::new();
+
+    if magnitud_max > 2.0 && magnitud_min > 2.0 {
+        if idx_max < idx_min {
+            direccion = "IZQUIERDA".to_string();
+            patron_info = "campana↑→↓".to_string();
+        } else {
+            direccion = "DERECHA".to_string();
+            patron_info = "campana↓→↑".to_string();
+        }
+    } else if magnitud_max > magnitud_min * 1.5 {
+        direccion = "IZQUIERDA".to_string();
+        patron_info = "solo↑".to_string();
+    } else if magnitud_min > magnitud_max * 1.5 {
+        direccion = "DERECHA".to_string();
+        patron_info = "solo↓".to_string();
+    }
+
+    if direccion == "DESCONOCIDA" {
+        None
+    } else {
+        // bool = true si DERECHA, false si IZQUIERDA
+        Some((direccion == "DERECHA", patron_info))
+    }
+}
+
+/// Aplica corrección de dirección a labels de slide siguiendo la lógica de
+/// main_ble_vsr.cpp. Devuelve un nuevo String (posiblemente igual al input).
+fn apply_slide_correction(
+    label: &str,
+    window: &[[[f32; CHANNELS]; SENSORS]; WINDOW_SIZE],
+) -> String {
+    // Solo nos interesa para gestos de tipo slide
+    if !label.contains("slide") && !label.contains("Slide") && !label.contains("SLIDE") {
+        return label.to_string();
+    }
+
+    if let Some((is_right, patron_info)) = slide_direction_cpp_style(window) {
+        let mut display_label = label.to_string();
+        let tiene_derecha = display_label.contains("derecha");
+        let tiene_izquierda = display_label.contains("izquierda");
+
+        let direccion_detectada = if is_right { "DERECHA" } else { "IZQUIERDA" };
+
+        if tiene_derecha || tiene_izquierda {
+            let es_derecha_label = tiene_derecha;
+            let es_derecha_detectada = is_right;
+
+            if es_derecha_label != es_derecha_detectada {
+                // corregir texto
+                if es_derecha_label {
+                    if let Some(pos) = display_label.find("derecha") {
+                        display_label.replace_range(pos..pos + "derecha".len(), "izquierda");
+                    }
+                } else {
+                    if let Some(pos) = display_label.find("izquierda") {
+                        display_label.replace_range(pos..pos + "izquierda".len(), "derecha");
+                    }
+                }
+                display_label.push_str(&format!(" [CORREGIDO por patrón: {}]", patron_info));
+            } else {
+                display_label.push_str(&format!(" [✓ {}]", patron_info));
+            }
+        } else {
+            // No tenía dirección explícita: la añadimos
+            display_label.push_str(&format!("-{} [{}]", direccion_detectada, patron_info));
+        }
+
+        display_label
+    } else {
+        label.to_string()
+    }
+}
 
 /// Predice un gesto desde una ventana usando el pipeline Python
 fn predict_window(
@@ -97,16 +221,24 @@ fn predict_all_scores(
 }
 
 /// Conversión string → enum GestureAction
+/// Nota: usamos prefijos para ignorar sufijos como "[CORREGIDO por patrón ...]".
 fn map_label_to_action(label: &str) -> Option<GestureAction> {
     use GestureAction::*;
-    match label {
-        "gesto-slide-derecha" => Some(SlideDer),
-        "gesto-slide-izquierda" => Some(SlideIzq),
-        "gesto-zoom-in" => Some(ZoomIn),
-        "gesto-zoom-out" => Some(ZoomOut),
-        "gesto-grab" => Some(Grab),
-        "gesto-drop" => Some(Drop),
-        _ => None,
+
+    if label.starts_with("gesto-slide-derecha") {
+        Some(SlideDer)
+    } else if label.starts_with("gesto-slide-izquierda") {
+        Some(SlideIzq)
+    } else if label.starts_with("gesto-zoom-in") {
+        Some(ZoomIn)
+    } else if label.starts_with("gesto-zoom-out") {
+        Some(ZoomOut)
+    } else if label.starts_with("gesto-grab") {
+        Some(Grab)
+    } else if label.starts_with("gesto-drop") {
+        Some(Drop)
+    } else {
+        None
     }
 }
 
@@ -167,6 +299,27 @@ fn main() -> Result<()> {
         let clf = cls.call((), Some(kwargs))?;
         println!("✅ Clasificador cargado\n");
         
+        // ===== Canal y hilo HID para enviar acciones =====
+        let (tx_gesture, rx_gesture) = unbounded::<GestureAction>();
+        std::thread::spawn(move || {
+            let mut hid = match HidOutput::new() {
+                Ok(h) => {
+                    println!("✅ HID inicializado (/dev/uinput)");
+                    h
+                }
+                Err(e) => {
+                    eprintln!("❌ No se pudo inicializar HID: {}", e);
+                    eprintln!("   Ejecuta con: sudo modprobe uinput");
+                    return;
+                }
+            };
+            while let Ok(action) = rx_gesture.recv() {
+                if let Err(e) = hid.send(action) {
+                    eprintln!("❌ Error enviando gesto HID {:?}: {}", action, e);
+                }
+            }
+        });
+
         // ===== Inicializar GestureExtractor automático =====
         let mut extractor = GestureExtractor::new(ExtractorParams {
             fixed_len: 64,
@@ -178,15 +331,15 @@ fn main() -> Result<()> {
             prefix: "gesto_".to_string(),
         });
         
-        // Cola thread-safe para gestos detectados (equivalente a pending_gestures en C++)
+        // Cola thread-safe para gestos detectados (5 ventanas por gesto)
         use std::sync::{Arc, Mutex};
-        let pending_gestures: Arc<Mutex<VecDeque<Vec<SensorFrame>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let pending_gestures: Arc<Mutex<VecDeque<[Vec<SensorFrame>; 5]>>> = Arc::new(Mutex::new(VecDeque::new()));
         let pending_gestures_clone = Arc::clone(&pending_gestures);
         
-        // Configurar callback del extractor para encolar gestos detectados
-        extractor.set_callback(move |frames: &[SensorFrame]| {
+        // Configurar callback del extractor para encolar las 5 ventanas del gesto detectado
+        extractor.set_callback(move |windows5: &[Vec<SensorFrame>; 5]| {
             let mut queue = pending_gestures_clone.lock().unwrap();
-            queue.push_back(frames.to_vec());
+            queue.push_back(windows5.clone());
         });
         
         println!("✅ GestureExtractor automático inicializado");
@@ -214,7 +367,7 @@ fn main() -> Result<()> {
                             extractor.feed(frame);
                             
                             // ===== Procesar gestos detectados automáticamente =====
-                            let mut gestures_to_process = Vec::new();
+                            let mut gestures_to_process: Vec<[Vec<SensorFrame>; 5]> = Vec::new();
                             {
                                 let mut queue = pending_gestures.lock().unwrap();
                                 while let Some(gesture_frames) = queue.pop_front() {
@@ -222,32 +375,55 @@ fn main() -> Result<()> {
                                 }
                             }
                             
-                            for gesture_frames in gestures_to_process {
-                                // Convertir Vec<SensorFrame> a formato ventana [64, 5, 7]
-                                let mut window = [[[0.0f32; CHANNELS]; SENSORS]; WINDOW_SIZE];
-                                
-                                for (t, frame) in gesture_frames.iter().enumerate().take(WINDOW_SIZE) {
-                                    for (s, sensor_opt) in frame.iter().enumerate() {
-                                        if let Some(sensor_data) = sensor_opt {
-                                            window[t][s] = *sensor_data;
+                            for windows5 in gestures_to_process {
+                                // Clasificar las 5 ventanas y votar
+                                use std::collections::HashMap;
+                                let mut votes: HashMap<String, (u32, f32)> = HashMap::new();
+                                let mut centered_window_buf = [[[0.0f32; CHANNELS]; SENSORS]; WINDOW_SIZE];
+
+                                for (idx_w, frames_vec) in windows5.iter().enumerate() {
+                                    let mut window = [[[0.0f32; CHANNELS]; SENSORS]; WINDOW_SIZE];
+                                    for (t, frame) in frames_vec.iter().enumerate().take(WINDOW_SIZE) {
+                                        for (s, sensor_opt) in frame.iter().enumerate() {
+                                            if let Some(sensor_data) = sensor_opt {
+                                                window[t][s] = *sensor_data;
+                                            }
                                         }
+                                    }
+                                    if idx_w == 2 { centered_window_buf = window; }
+                                    match predict_window(py, clf, &window) {
+                                        Ok((label, conf)) => {
+                                            let e = votes.entry(label).or_insert((0, 0.0));
+                                            e.0 += 1; // voto
+                                            if conf > e.1 { e.1 = conf; }
+                                        }
+                                        Err(e) => eprintln!("❌ Error clasificando ventana {}: {}", idx_w, e),
                                     }
                                 }
-                                
-                                // Clasificar el gesto detectado automáticamente con SVM
-                                match predict_window(py, clf, &window) {
-                                    Ok((label, conf)) => {
-                                        // Imprimir todos los gestos detectados
-                                        if label != "desconocido" && conf >= CONFIDENCE_THRESHOLD {
-                                            println!("│ {:>7} │ 🎯 {:<18} │ {:>8.1}% │ [SVM]    │",
-                                                frames_received,
-                                                label,
-                                                conf * 100.0
-                                            );
-                                        }
+
+                                if votes.is_empty() { continue; }
+
+                                // Elegir label con más votos; desempatar por mayor confianza
+                                let (mut best_label, mut best_cnt, mut best_conf) = (String::new(), 0u32, 0.0f32);
+                                for (label, (cnt, conf)) in votes.into_iter() {
+                                    if cnt > best_cnt || (cnt == best_cnt && conf > best_conf) {
+                                        best_label = label;
+                                        best_cnt = cnt;
+                                        best_conf = conf;
                                     }
-                                    Err(e) => {
-                                        eprintln!("❌ Error clasificando gesto automático: {}", e);
+                                }
+
+                                // Corrección de dirección para gestos de slide al estilo C++
+                                let final_label = apply_slide_correction(&best_label, &centered_window_buf);
+
+                                if final_label != "desconocido" && best_conf >= CONFIDENCE_THRESHOLD {
+                                    println!("│ {:>7} │ 🎯 {:<18} │ {:>8.1}% │ [VOTE]   │",
+                                        frames_received,
+                                        final_label,
+                                        best_conf * 100.0
+                                    );
+                                    if let Some(action) = map_label_to_action(&final_label) {
+                                        let _ = tx_gesture.send(action);
                                     }
                                 }
                             }
@@ -405,8 +581,10 @@ fn debug_mode() -> Result<()> {
                                 continue;
                             }
                             
-                            // Tomar el primer CSV
-                            let csv_path = &csv_files[0];
+                            // Tomar un CSV aleatorio
+                            use rand::Rng;
+                            let random_idx = rand::thread_rng().gen_range(0..csv_files.len());
+                            let csv_path = &csv_files[random_idx];
                             let file_name = csv_path.file_name()
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("unknown.csv");
@@ -419,17 +597,19 @@ fn debug_mode() -> Result<()> {
                                     // Predecir gesto
                                     match predict_window(py, clf, &window) {
                                         Ok((label, conf)) => {
-                                            println!("🎯 Predicción: {} ({:.1}%)", label, conf * 100.0);
+                                            // Corrección de dirección para slide al estilo C++
+                                            let final_label = apply_slide_correction(&label, &window);
+                                            println!("🎯 Predicción: {} ({:.1}%)", final_label, conf * 100.0);
                                             
                                             // Convertir a GestureAction y enviar a HID
-                                            if let Some(action) = map_label_to_action(&label) {
+                                            if let Some(action) = map_label_to_action(&final_label) {
                                                 if conf >= CONFIDENCE_THRESHOLD {
                                                     let _ = tx_gesture.send(action);
                                                 } else {
                                                     println!("⚠️  Confianza baja, no se envía HID");
                                                 }
                                             } else {
-                                                println!("⚠️  Gesto no mapeado a acción HID: {}", label);
+                                                println!("⚠️  Gesto no mapeado a acción HID: {}", final_label);
                                             }
                                         }
                                         Err(e) => {

@@ -5,9 +5,9 @@
 #   - classes.json  {"index_to_class": {"0":"...", ...}}
 
 import json, math
+import numpy as np
 from pathlib import Path
 from typing import Tuple, Optional
-import numpy as np
 from joblib import load
 
 # ====== parámetros del stream ======
@@ -28,34 +28,62 @@ def _bandpower(psd, freqs, fmin, fmax):
     return np.trapz(psd[m], freqs[m])
 
 def features_from_tensor(T: np.ndarray) -> np.ndarray:
-    """T: [5,64,7] -> vector de features time+fft exactamente como en Colab."""
+    """T: [5,64,7] -> vector de features time+fft.
+    Ajustado como en la referencia en C: FFT con ventana de Hamming y +5 features finales.
+    """
     feats = []
     for s in range(5):
-        ax, ay, az, w, i_, j_, k_ = [T[s,:,k] for k in range(7)]
-        # tiempo (aceleros)
-        for sig in (ax,ay,az):
+        ax, ay, az, w, i_, j_, k_ = [T[s, :, k] for k in range(7)]
+        # --- Temporal (aceleros)
+        for sig in (ax, ay, az):
             feats += [
-                np.mean(sig), np.std(sig), np.median(sig),
-                iqr(sig), np.max(sig)-np.min(sig),
-                np.sqrt(np.mean(sig**2)),
-                np.mean(np.abs(np.diff(sig)))
+                float(np.mean(sig)), float(np.std(sig)), float(np.median(sig)),
+                float(iqr(sig)), float(np.max(sig) - np.min(sig)),
+                float(np.sqrt(np.mean(sig**2))),
+                float(np.mean(np.abs(np.diff(sig))))
             ]
-        # cuaterniones: delta
+        # --- Cuaterniones: delta
         dq = np.sqrt(np.diff(w)**2 + np.diff(i_)**2 + np.diff(j_)**2 + np.diff(k_)**2)
-        feats += [np.mean(dq), np.std(dq), np.max(dq), np.median(dq)]
-        # FFT (aceleros)
-        for sig in (ax,ay,az):
-            X = rfft(sig - np.mean(sig))
-            freqs = rfftfreq(sig.size, d=1.0/FS)
-            psd = (np.abs(X)**2) / sig.size
-            dom_idx = np.argmax(psd[1:]) + 1
-            dom_f = freqs[dom_idx]
-            centroid = np.sum(freqs*psd)/np.sum(psd) if np.sum(psd)>0 else 0.0
-            pnorm = psd/np.sum(psd) if np.sum(psd)>0 else np.zeros_like(psd)
-            ent = entropy(pnorm + 1e-12, base=2)
+        feats += [float(np.mean(dq)), float(np.std(dq)), float(np.max(dq)), float(np.median(dq))]
+        # --- FFT (aceleros) con Hamming y corrección de potencia
+        for sig in (ax, ay, az):
+            sig0 = sig - np.mean(sig)
+            if sig0.size > 1:
+                n = sig0.size
+                n_arr = np.arange(n, dtype=np.float32)
+                win = 0.54 - 0.46 * np.cos(2.0 * np.pi * n_arr / (n - 1))
+                X = rfft(sig0 * win)
+                w2 = float(np.mean(win.astype(np.float64)**2)) if n > 0 else 1.0
+                denom = n * (w2 if w2 > 1e-12 else 1.0)
+                psd = (np.abs(X)**2) / denom
+                freqs = rfftfreq(n, d=1.0 / FS)
+            else:
+                freqs = np.array([0.0], dtype=np.float32)
+                psd = np.array([0.0], dtype=np.float32)
+            if psd.size > 1:
+                dom_idx = int(np.argmax(psd[1:]) + 1)
+            else:
+                dom_idx = 0
+            dom_f = float(freqs[dom_idx]) if dom_idx < freqs.size else 0.0
+            ps_sum = float(np.sum(psd))
+            centroid = float(np.sum(freqs * psd) / ps_sum) if ps_sum > 0 else 0.0
+            pnorm = psd / ps_sum if ps_sum > 0 else np.zeros_like(psd)
+            ent = float(entropy(pnorm + 1e-12, base=2))
             feats += [dom_f, centroid, ent]
-            for (f1,f2) in BANDS:
-                feats += [_bandpower(psd, freqs, f1, f2)]
+            for (f1, f2) in BANDS:
+                feats += [float(_bandpower(psd, freqs, f1, f2))]
+
+    # === +5 features adicionales (sensor 0) ===
+    ax0 = T[0, :, 0]
+    ay0 = T[0, :, 1]
+    az0 = T[0, :, 2]
+    sum_ax = float(np.sum(ax0))
+    sum_ay = float(np.sum(ay0))
+    sum_az = float(np.sum(az0))
+    delta_ax = float(ax0[-1] - ax0[0])
+    delta_ay = float(ay0[-1] - ay0[0])
+    feats += [sum_ax, sum_ay, sum_az, delta_ax, delta_ay]
+
     return np.array(feats, dtype=np.float32)
 
 # --- Umbrales anti-falsos ---

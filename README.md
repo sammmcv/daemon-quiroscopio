@@ -1,4 +1,4 @@
-# Reconocimiento de gestos BLE en tiempo real con Rust + Python
+# Reconocimiento de gestos BLE con Rust + Python
 
 Este proyecto permite reconocer gestos de mano en tiempo real usando sensores IMU conectados por Bluetooth Low Energy (BLE), procesando los datos en Rust y ejecutando la inferencia de gestos con un pipeline de Machine Learning en Python.
 

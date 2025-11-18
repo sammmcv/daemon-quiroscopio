@@ -167,7 +167,15 @@ fn decode_superframe(value: &[u8]) -> Option<SensorFrame> {
     LAST_CNT10.store(cnt10, Ordering::Relaxed);
     HAVE_LAST_CNT.store(1, Ordering::Relaxed);
     
-    // Decodificar sensores
+    // Decodificar sensores con mapeo de presencia -> índice lógico
+    // Mapa según referencia C++:
+    // bit 0 -> idx 0 (UART c0)
+    // bit 1 -> idx 1 (0x28 c0)
+    // bit 2 -> idx 3 (0x28 c1)
+    // bit 3 -> idx 2 (0x29 c0)
+    // bit 4 -> idx 4 (0x29 c1)
+    let map_idx = [0usize, 1usize, 3usize, 2usize, 4usize];
+
     let mut frame: SensorFrame = [None; 5];
     let mut offset = 2;
     
@@ -189,7 +197,8 @@ fn decode_superframe(value: &[u8]) -> Option<SensorFrame> {
         let qw = i16::from_le_bytes([value[offset + 12], value[offset + 13]]) as f32 / 16384.0;
         
         // Formato: [ax, ay, az, qw, qx, qy, qz]
-        frame[i] = Some([ax, ay, az, qw, qx, qy, qz]);
+        let dst = map_idx[i];
+        frame[dst] = Some([ax, ay, az, qw, qx, qy, qz]);
         
         offset += 14;
     }
