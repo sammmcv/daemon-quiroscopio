@@ -1,6 +1,6 @@
 # Sistema de Reconocimiento de Gestos BLE
 
-Sistema de reconocimiento de gestos que utiliza sensores IMU conectados por Bluetooth Low Energy (BLE). Desarrollado en Rust para el procesamiento de datos, con integración de modelos de Machine Learning en Python para la clasificación de gestos.
+Sistema de reconocimiento de gestos que utiliza sensores IMU conectados por Bluetooth Low Energy (BLE). Desarrollado en Rust para el procesamiento de datos, con integración de modelos de Machine Learning en Python para la clasificación y traduccion de gestos.
 
 ## Estructura del proyecto
 
