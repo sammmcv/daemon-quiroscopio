@@ -1,104 +1,177 @@
-# Reconocimiento de gestos BLE con Rust + Python
+# Sistema de Reconocimiento de Gestos BLE
 
-Este proyecto permite reconocer gestos de mano en tiempo real usando sensores IMU conectados por Bluetooth Low Energy (BLE), procesando los datos en Rust y ejecutando la inferencia de gestos con un pipeline de Machine Learning en Python.
+Sistema de reconocimiento de gestos en tiempo real que utiliza sensores IMU conectados por Bluetooth Low Energy (BLE). Desarrollado en Rust para el procesamiento de datos en tiempo real, con integración de modelos de Machine Learning en Python para la clasificación de gestos.
 
 ## Estructura del proyecto
 
 ```
-├── src/
-│   ├── main.rs                # Binario principal: recibe frames BLE y ejecuta inferencia
-│   ├── ble.rs                 # Módulo BLE: conexión y decodificación de frames
-│   └── gesture_buffer.rs      # Buffer circular para ventanas IMU
-├── python/
-│   ├── gesture_infer.py       # Pipeline de clasificación Python
-│   ├── best_pipeline__*.joblib  # Modelo SVM entrenado
-│   ├── robust_scaler_acc.joblib # Scaler para acelerómetros
-│   └── labels.json            # Lista de clases de gestos
-├── Cargo.toml                 # Configuración Rust
-└── README.md                  # Este archivo
+├── src/                       # Código fuente Rust
+│   ├── main.rs                # Aplicación principal
+│   ├── ble.rs                 # Módulo de comunicación BLE
+│   ├── gesture_buffer.rs      # Gestión de buffers de datos
+│   ├── gesture_extractor.rs   # Extracción de características
+│   └── hid.rs                 # Interfaz de salida HID
+├── python/                    # Pipeline de clasificación
+│   ├── gesture_infer.py       # Script de inferencia
+│   ├── best_pipeline__*.joblib # Modelos entrenados
+│   └── classes.json           # Etiquetas de gestos
+├── gestos/                    # Datos de entrenamiento organizados por gesto
+│   ├── gesto-drop/
+│   ├── gesto-grab/
+│   ├── gesto-slide-derecha/
+│   ├── gesto-slide-izquierda/
+│   ├── gesto-zoom-in/
+│   └── gesto-zoom-out/
+├── Cargo.toml                 # Configuración del proyecto Rust
+└── README.md
 ```
 
 ## Flujo de ejecución
 
-1. **Conexión BLE**: Rust se conecta a los sensores IMU vía Bluetooth y recibe frames en tiempo real.
-2. **Buffer de ventanas**: Los datos se acumulan en un buffer circular de 64 muestras por sensor.
-3. **Inferencia Python**: Cuando hay suficiente movimiento, Rust llama al pipeline Python embebido (PyO3) para predecir el gesto.
-4. **Votación y salida**: Se estabilizan las predicciones con votación y se muestra el resultado en consola.
+1. **Captura BLE**: Conexión a sensores IMU y recepción de datos en tiempo real
+2. **Procesamiento**: Acumulación de datos en ventanas de tiempo y extracción de características
+3. **Clasificación**: Inferencia de gestos mediante modelos de ML (integración PyO3)
+4. **Salida**: Generación de eventos de entrada del sistema o visualización de resultados
 
-## Instalación y dependencias
+## Requisitos del sistema
 
-### Requisitos
-- **Rust 2021+** — [Instalar](https://rustup.rs/)
-- **Python 3.8+** — Con pip instalado
+- **Rust**: Versión estable reciente ([Instalar](https://rustup.rs/))
+- **Python**: Versión 3.8 o superior
+- **Bluetooth**: Adaptador BLE compatible
 
-### Dependencias Rust
-En `Cargo.toml`:
-- `pyo3` — Embebe el intérprete Python
-- `numpy` — Puente Rust ↔ NumPy arrays
-- `anyhow`, `serde_json`, `dbus`, `crossbeam-channel`
+## Instalación
 
-Instala con:
+### 1. Clonar el repositorio
 ```bash
-cargo build --release
+git clone <repository-url>
+cd rust
 ```
 
-### Dependencias Python
-Instala los paquetes requeridos:
+### 2. Instalar dependencias de Python
 ```bash
 pip install numpy scipy scikit-learn joblib pandas
 ```
 
-## Ejecución
-
-### Reconocimiento en tiempo real (BLE)
+### 3. Compilar el proyecto
 ```bash
+# Modo desarrollo
+cargo build
+
+# Modo producción (optimizado)
+cargo build --release
+```
+
+## Uso
+
+### Reconocimiento en tiempo real
+```bash
+# Ejecutar con dirección MAC del dispositivo BLE
 ./target/release/onnx-predictor <MAC_ADDRESS>
-# Ejemplo:
+
+# Ejemplo
 ./target/release/onnx-predictor 28:CD:C1:08:37:69
 ```
 
-### Inferencia por CSV (Python)
+### Inferencia offline con archivos CSV
 ```bash
-python3 python/gesture_infer.py --artifacts python --csv gesto-drop/000001_plot.csv
+python3 python/gesture_infer.py --artifacts python --csv gestos/gesto-drop/000001_plot.csv
 ```
 
-## Ejemplo de salida
+## Configuración
 
-```
-🎯 Gesture Recognition System - BLE Real-Time
+Los parámetros principales del sistema pueden ajustarse según las necesidades:
 
-✅ Clasificador cargado
-┌──────────────────────────────────────────────────────────────────┐
-│  Frames │ Predicción          │ Conf.  │ Votación     │ Mov.   │
-├──────────────────────────────────────────────────────────────────┤
-│    1234 │ ✅ gesto-grab       │  99.2% │ 3/3          │ [mov:1.23]
-└──────────────────────────────────────────────────────────────────┘
-```
+- **Umbral de confianza**: Nivel mínimo de certeza para aceptar predicciones
+- **Tamaño de ventana**: Cantidad de muestras para análisis temporal
+- **Umbral de movimiento**: Sensibilidad de detección de gestos
+- **Sensores activos**: Configuración de dispositivos IMU
 
-## Personalización
+Consulta los archivos de código fuente para modificar estos parámetros.
 
-- Cambia el umbral de confianza en `src/main.rs`:
-  ```rust
-  const CONFIDENCE_THRESHOLD: f32 = 0.85;
-  ```
-- Cambia el umbral de movimiento para detectar gestos reales:
-  ```rust
-  const MOVEMENT_THRESHOLD: f32 = 1.0;
-  ```
+## Características principales
 
-## Formato de datos IMU
+- **Procesamiento en tiempo real**: Captura y análisis continuo de datos IMU
+- **Integración Rust-Python**: Combinación de rendimiento de Rust con ecosistema ML de Python
+- **Múltiples sensores**: Soporte para configuraciones multi-sensor
+- **Estabilización de predicciones**: Sistema de votación para reducir falsos positivos
+- **Interfaz HID**: Generación de eventos de entrada del sistema
+- **Formato flexible**: Capacidad de procesar datos en tiempo real o desde archivos
 
-- Cada frame: `[Option<[f32; 7]>; 5]` (5 sensores, 7 canales: ax, ay, az, w, i, j, k)
-- Ventana para inferencia: `[64, 5, 7]`
+## Gestos soportados
 
-## Troubleshooting
+El sistema puede reconocer diferentes tipos de gestos, incluyendo:
+- Movimientos de agarrar y soltar
+- Deslizamientos direccionales
+- Gestos de zoom
 
-- **Error de módulo Python**: Verifica que `python/gesture_infer.py` exista y que los artefactos estén en la carpeta correcta.
-- **Error de conexión BLE**: Asegúrate de que el adaptador Bluetooth esté encendido y el dispositivo disponible.
-- **Performance lento**: Usa `--release` y asegúrate de que los paquetes Python estén instalados.
+Los gestos específicos y sus configuraciones se encuentran en el directorio `gestos/`.
 
-## Notas técnicas
+## Arquitectura técnica
 
-- El pipeline Python extrae 420 features por ventana (5 sensores × 7 canales × 12 estadísticas).
-- El sistema embebe Python en Rust usando PyO3, sin subprocesos externos.
-- El buffer circular permite ventanas deslizantes y manejo de sensores ausentes.
+### Comunicación BLE
+- Protocolo de bajo nivel para comunicación con sensores IMU
+- Manejo de múltiples dispositivos simultáneos
+- Procesamiento asíncrono de frames
+
+### Pipeline de clasificación
+- Extracción de características temporales y espectrales
+- Modelos de Machine Learning optimizados
+- Procesamiento vectorizado de datos
+
+### Interfaz de salida
+- Generación de eventos del sistema
+- Compatibilidad con protocolos HID
+- Logging y visualización de predicciones
+
+## Resolución de problemas
+
+### Problemas comunes
+
+**Error de módulo Python**
+- Verifica que los archivos del pipeline estén en el directorio correcto
+- Asegúrate de que todas las dependencias de Python estén instaladas
+
+**Problemas de conexión BLE**
+- Confirma que el adaptador Bluetooth esté activo
+- Verifica que el dispositivo esté encendido y dentro del rango
+- Comprueba los permisos de acceso a Bluetooth en tu sistema
+
+**Rendimiento lento**
+- Utiliza la versión `--release` para mejor performance
+- Verifica que no haya otros procesos consumiendo recursos
+- Considera ajustar los parámetros de ventana y umbrales
+
+**Errores de compilación**
+- Actualiza Rust a la versión más reciente
+- Verifica que todas las dependencias estén disponibles
+- Revisa la compatibilidad de las versiones de las librerías
+
+## Desarrollo
+
+### Estructura de módulos
+
+El proyecto está organizado en módulos independientes que pueden ser modificados según necesidades:
+
+- **BLE**: Gestión de comunicación con sensores
+- **Buffer**: Manejo de datos temporales
+- **Extractor**: Procesamiento de características
+- **HID**: Interfaz con el sistema operativo
+- **Main**: Orquestación del flujo general
+
+### Añadir nuevos gestos
+
+1. Captura datos del gesto en formato CSV
+2. Organiza los archivos en el directorio `gestos/`
+3. Actualiza el modelo de clasificación según sea necesario
+4. Ajusta los parámetros de reconocimiento si es requerido
+
+## Licencia
+
+Consulta el archivo LICENSE.txt para más información.
+
+## Notas adicionales
+
+- El sistema utiliza PyO3 para integración directa Rust-Python sin overhead de IPC
+- Los datos IMU incluyen acelerómetro y cuaterniones de orientación
+- El procesamiento puede funcionar con sensores faltantes mediante manejo de opcionales
+- La arquitectura permite agregar nuevos tipos de salida o procesamiento fácilmente
