@@ -1,16 +1,16 @@
-use crate::ble::SensorFrame;
+use crate::types::{SampleFrame, WINDOW_SIZE};
 use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::Write;
 
 /// Una muestra compacta de los 5 sensores con 7 canales cada uno
 /// Equivalente a SampleFrame en C++
-pub type ExtractorFrame = SensorFrame;
+pub type ExtractorFrame = SampleFrame;
 
 /// Parámetros de configuración del extractor
 #[derive(Debug, Clone)]
 pub struct ExtractorParams {
-    /// Tamaño de ventana fija (default: 64)
+    /// Tamaño de ventana fija (default: 16)
     pub fixed_len: usize,
     /// Umbral alto para detección (|acc| máx) (default: 10.0)
     pub high_thr: f32,
@@ -29,7 +29,7 @@ pub struct ExtractorParams {
 impl Default for ExtractorParams {
     fn default() -> Self {
         Self {
-            fixed_len: 64,
+            fixed_len: WINDOW_SIZE,
             high_thr: 10.0,
             low_thr_ratio: 0.45,
             min_len: 6,
@@ -67,12 +67,12 @@ pub struct GestureExtractor {
     /// Buffer de captura (frames desde que se detectó el umbral alto)
     capture: Vec<ExtractorFrame>,
     
-    /// Buffer circular de últimos fixed_len*2 frames (128 por defecto)
-    /// Para tener contexto antes Y después del pico
+    /// Buffer circular de últimos fixed_len*2 frames (32 por defecto, como en C++)
+    /// Para tener contexto antes y después del pico
     buffer: VecDeque<ExtractorFrame>,
     
     /// Callback que se ejecuta cuando se detecta un gesto: entrega 5 ventanas
-    /// con offsets [-20, -10, 0, +10, +20] para votación
+    /// con offsets [-6, -3, 0, +3, +6] para votación, igual al extractor en C++
     callback: Option<Box<dyn FnMut(&[Vec<ExtractorFrame>; 5]) + Send>>,
 }
 
@@ -83,6 +83,7 @@ impl GestureExtractor {
         let _ = fs::create_dir_all(&params.out_dir);
         
         let low_thr = params.high_thr * params.low_thr_ratio;
+        let buffer_capacity = params.fixed_len * 2;
         
         Self {
             params,
@@ -93,7 +94,7 @@ impl GestureExtractor {
             cooldown_left: 0,
             file_idx: 0,
             capture: Vec::new(),
-            buffer: VecDeque::with_capacity(128),
+            buffer: VecDeque::with_capacity(buffer_capacity),
             callback: None,
         }
     }
@@ -144,7 +145,7 @@ impl GestureExtractor {
                     if self.capture.len() >= self.params.min_len {
                         // Gesto válido, esperar frames posteriores
                         self.state = State::PostCapture;
-                        self.post_capture_left = self.params.fixed_len / 2; // 32 frames más
+                        self.post_capture_left = self.params.fixed_len / 4;
                     } else {
                         // Demasiado corto, descartar
                         self.state = State::Cooldown;
@@ -180,17 +181,7 @@ impl GestureExtractor {
     
     /// Calcula el valor absoluto máximo de aceleración en un frame
     fn frame_max_abs(frame: &ExtractorFrame) -> f32 {
-        let mut max = 0.0f32;
-        
-        for sensor_data in frame.iter().flatten() {
-            // sensor_data = [ax, ay, az, qw, qx, qy, qz]
-            // Solo consideramos aceleraciones (índices 0, 1, 2)
-            max = max.max(sensor_data[0].abs());
-            max = max.max(sensor_data[1].abs());
-            max = max.max(sensor_data[2].abs());
-        }
-        
-        max
+        frame.max_abs_accel()
     }
     
     /// Guarda la captura actual: busca el pico, extrae 5 ventanas alrededor
@@ -212,10 +203,10 @@ impl GestureExtractor {
             }
         }
         
-        // 2) Construir 5 ventanas de L frames con offsets [-20, -10, 0, +10, +20]
+        // 2) Construir 5 ventanas de L frames con offsets [-6,-3,0,+3,+6], igual que el extractor en C++
         let l = self.params.fixed_len;
         let half = l / 2;
-        let offsets = [-20i32, -10, 0, 10, 20];
+        let offsets = [-6, -3, 0, 3, 6];
         let mut windows: [Vec<ExtractorFrame>; 5] = [
             Vec::with_capacity(l),
             Vec::with_capacity(l),
@@ -246,7 +237,7 @@ impl GestureExtractor {
         
         // 4) Escribir CSV de la ventana centrada (widx=2)
         let filename = format!(
-            "{}/{}_{:05}.csv",
+            "{}/{}{:05}.csv",
             self.params.out_dir,
             self.params.prefix,
             self.file_idx
@@ -267,24 +258,21 @@ impl GestureExtractor {
         writeln!(file, "sample,sensor,ax,ay,az,w,i,j,k")?;
         
         // Escribir datos
-    for (t, frame) in window.iter().enumerate() {
-            for (s, sensor_opt) in frame.iter().enumerate() {
-                if let Some(sensor_data) = sensor_opt {
-                    // sensor_data = [ax, ay, az, qw, qx, qy, qz]
-                    writeln!(
-                        file,
-                        "{},{},{},{},{},{},{},{},{}",
-                        t,
-                        s,
-                        sensor_data[0], // ax
-                        sensor_data[1], // ay
-                        sensor_data[2], // az
-                        sensor_data[3], // qw
-                        sensor_data[4], // qx
-                        sensor_data[5], // qy
-                        sensor_data[6], // qz
-                    )?;
-                }
+        for (t, frame) in window.iter().enumerate() {
+            for s in 0..5 {
+                writeln!(
+                    file,
+                    "{},{},{},{},{},{},{},{},{}",
+                    t,
+                    s,
+                    frame.ax[s], // ax
+                    frame.ay[s], // ay
+                    frame.az[s], // az
+                    frame.qw[s], // qw
+                    frame.qx[s], // qx (i)
+                    frame.qy[s], // qy (j)
+                    frame.qz[s], // qz (k)
+                )?;
             }
         }
         
@@ -335,14 +323,15 @@ mod tests {
     #[test]
     fn test_buffer_circular() {
         let mut extractor = GestureExtractor::new(ExtractorParams::default());
-        
-        // Alimentar más de 128 frames
+        let max_frames = ExtractorParams::default().fixed_len * 2;
+
+        // Alimentar más de max_frames frames
         for i in 0..200 {
             extractor.feed(create_test_frame(i as f32 / 100.0));
         }
         
-        // El buffer debe mantener máximo 128 frames
-        assert!(extractor.buffer_len() <= 128);
+        // El buffer debe mantener máximo fixed_len*2 frames (32 por defecto)
+        assert!(extractor.buffer_len() <= max_frames);
     }
 
     #[test]

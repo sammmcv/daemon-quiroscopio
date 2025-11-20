@@ -83,12 +83,12 @@ pub fn start_ble_receiver(target_mac: &str, tx: Sender<SensorFrame>) -> Result<(
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(5));
-            let sf = SUPERFRAMES.load(Ordering::Relaxed);
-            let lost = LOST_FRAMES.load(Ordering::Relaxed);
+            let _sf = SUPERFRAMES.load(Ordering::Relaxed);
+            let _lost = LOST_FRAMES.load(Ordering::Relaxed);
                 // (Print de estadísticas deshabilitado)
-                // if sf > 0 {
-                //     let loss_rate = (lost as f32 / sf as f32) * 100.0;
-                //     println!("[📊 STATS] Frames recibidos={} perdidos={} ({:.2}%)", sf, lost, loss_rate);
+                // if _sf > 0 {
+                //     let loss_rate = (_lost as f32 / _sf as f32) * 100.0;
+                //     println!("[📊 STATS] Frames recibidos={} perdidos={} ({:.2}%)", _sf, _lost, loss_rate);
                 // }
         }
     });

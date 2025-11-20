@@ -1,17 +1,41 @@
 [package]
-name = "onnx-predictor"
+name = "quiroscopio"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-pyo3 = { version = "0.21", features = ["auto-initialize"] }
-numpy = "0.21"
+# ONNX Runtime para inferencia
+ort = "=2.0.0-rc.10"
+
+# FFT para extracción de características
+rustfft = "6.2"
+
+# Estadísticas y operaciones matemáticas
+ndarray = "0.15"
+num-traits = "0.2"
+
+# Serialización (JSON para classes.json)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CSV para lectura de gestos
 csv = "1.3"
-anyhow = "1"
-serde_json = "1"
+
+# BLE y canales
 dbus = "0.9.7"
 crossbeam-channel = "0.5"
+
+# HID output
 uinput = "0.1"
 nix = { version = "0.27", features = ["term"] }
 evdev = "0.12"
+
+# Utilidades
+thiserror = "1.0"
+anyhow = "1"
 rand = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
