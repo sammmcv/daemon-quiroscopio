@@ -11,7 +11,7 @@ pub struct SampleFrame {
     pub ax: [f32; 5],
     pub ay: [f32; 5],
     pub az: [f32; 5],
-    
+
     /// Cuaterniones (qw, qx, qy, qz) para 5 sensores
     pub qw: [f32; 5],
     pub qx: [f32; 5],
@@ -23,7 +23,7 @@ impl SampleFrame {
     /// Crea un SampleFrame desde un SensorFrame de BLE
     pub fn from_sensor_frame(frame: &SensorFrame) -> Self {
         let mut sample = Self::default();
-        
+
         for (i, sensor_opt) in frame.iter().enumerate() {
             if let Some(sensor_data) = sensor_opt {
                 // sensor_data = [ax, ay, az, qw, qx, qy, qz]
@@ -36,10 +36,10 @@ impl SampleFrame {
                 sample.qz[i] = sensor_data[6];
             }
         }
-        
+
         sample
     }
-    
+
     /// Calcula el valor máximo absoluto de aceleración en todos los ejes y sensores
     pub fn max_abs_accel(&self) -> f32 {
         let mut max = 0.0f32;
@@ -50,7 +50,7 @@ impl SampleFrame {
         }
         max
     }
-    
+
     /// Convierte a formato plano [timestep * 5 * 7] para procesamiento
     /// Layout: [t][s][c] donde t=timestep, s=sensor, c=channel
     pub fn to_flat_array(&self, output: &mut [f32], time_idx: usize) {

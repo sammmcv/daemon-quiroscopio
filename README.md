@@ -5,24 +5,23 @@ Sistema de reconocimiento de gestos que utiliza sensores IMU conectados por Blue
 ## Estructura del proyecto
 
 ```
-├── src/                       # Código fuente Rust
-│   ├── main.rs                # Aplicación principal
-│   ├── ble.rs                 # Módulo de comunicación BLE
-│   ├── gesture_buffer.rs      # Gestión de buffers de datos
-│   ├── gesture_extractor.rs   # Extracción de características
-│   └── hid.rs                 # Interfaz de salida HID
-├── python/                    # Pipeline de clasificación
-│   ├── gesture_infer.py       # Script de inferencia
-│   ├── best_pipeline__*.joblib # Modelos entrenados
-│   └── classes.json           # Etiquetas de gestos
-├── gestos/                    # Datos de entrenamiento organizados por gesto
-│   ├── gesto-drop/
-│   ├── gesto-grab/
-│   ├── gesto-slide-derecha/
-│   ├── gesto-slide-izquierda/
-│   ├── gesto-zoom-in/
-│   └── gesto-zoom-out/
-├── Cargo.toml                 # Configuración del proyecto Rust
+├── src/
+│   ├── lib.rs                 # Punto común para los módulos públicos
+│   ├── main.rs                # Binario principal (BLE en tiempo real)
+│   ├── bin/
+│   │   └── replay_csv.rs      # Reproducción offline de gestos desde CSV
+│   ├── ble.rs                 # Comunicación BLE y parsing de frames
+│   ├── csv_loader.rs          # Utilidades para reconstruir ventanas desde CSV
+│   ├── feature_extractor.rs   # Extracción de 250 features (tiempo + FFT)
+│   ├── gesture_classifier.rs  # Wrapper de ONNX Runtime + sistema de votación
+│   ├── gesture_extractor.rs   # Detector de gestos y generación de 5 ventanas
+│   ├── hid.rs                 # Emulación HID vía /dev/uinput
+│   └── types.rs               # Tipos compartidos (SampleFrame, ventanas, etc.)
+├── cpp/                       # Referencia C++ original
+├── gestos_auto_rust/          # Ventanas CSV capturadas para debug/offline
+├── best_pipeline__time+fft__svm_rbf.onnx
+├── classes.json
+├── Cargo.toml
 └── README.md
 ```
 
@@ -65,17 +64,25 @@ cargo build --release
 
 ### Reconocimiento en tiempo continuo
 ```bash
-# Ejecutar con dirección MAC del dispositivo BLE
-./target/release/onnx-predictor <MAC_ADDRESS>
+# Exporta ONNX Runtime en el LD_LIBRARY_PATH (ajusta la ruta según tu entorno)
+set -x LD_LIBRARY_PATH onnxruntime-linux-x64-1.22.0/lib $LD_LIBRARY_PATH
 
-# Ejemplo
-./target/release/onnx-predictor 28:CD:C1:08:37:69
+# Ejecuta el binario principal con la MAC del gateway BLE
+cargo run --release -- 28:CD:C1:08:37:69
 ```
 
-### Inferencia offline con archivos CSV
+### Modo replay desde CSV
 ```bash
-python3 python/gesture_infer.py --artifacts python --csv gestos/gesto-drop/000001_plot.csv
+# Clasifica una ventana guardada en disco y muestra el top-5
+cargo run --release --bin replay_csv -- gestos_auto_rust/gesto__00000.csv
+
+# Opcional: imprime el tensor plano (16×5×7) y los 250 features
+cargo run --release --bin replay_csv -- --dump-flat --dump-features gestos_auto_rust/gesto___00042.csv
 ```
+
+El replay ejecuta exactamente el `FeatureExtractor` de Rust y el modelo SVM en ONNX.
+Además replica las 5 ventanas de votación (rellenadas desde la ventana centrada)
+para que puedas contrastar las probabilidades con el binario C++.
 
 ## Configuración
 

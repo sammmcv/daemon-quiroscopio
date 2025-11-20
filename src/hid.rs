@@ -1,7 +1,7 @@
 use std::time::Duration;
 use uinput::device::Device;
-use uinput::event::keyboard;
 use uinput::event::controller;
+use uinput::event::keyboard;
 use uinput::event::relative;
 
 #[derive(Debug, Clone, Copy)]
@@ -44,7 +44,8 @@ impl HidOutput {
     }
 
     fn ctrl_combo(&mut self, key: keyboard::Key) -> Result<(), uinput::Error> {
-        self.dev.press(&keyboard::Keyboard::Key(keyboard::Key::LeftControl))?;
+        self.dev
+            .press(&keyboard::Keyboard::Key(keyboard::Key::LeftControl))?;
         self.sync()?;
         std::thread::sleep(Duration::from_millis(10));
         self.dev.press(&keyboard::Keyboard::Key(key))?;
@@ -52,7 +53,8 @@ impl HidOutput {
         std::thread::sleep(Duration::from_millis(10));
         self.dev.release(&keyboard::Keyboard::Key(key))?;
         self.sync()?;
-        self.dev.release(&keyboard::Keyboard::Key(keyboard::Key::LeftControl))?;
+        self.dev
+            .release(&keyboard::Keyboard::Key(keyboard::Key::LeftControl))?;
         self.sync()
     }
 
@@ -73,12 +75,14 @@ impl HidOutput {
     }
 
     fn grab(&mut self) -> Result<(), uinput::Error> {
-        self.dev.press(&controller::Controller::Mouse(controller::Mouse::Left))?;
+        self.dev
+            .press(&controller::Controller::Mouse(controller::Mouse::Left))?;
         self.sync()
     }
 
     fn drop(&mut self) -> Result<(), uinput::Error> {
-        self.dev.release(&controller::Controller::Mouse(controller::Mouse::Left))?;
+        self.dev
+            .release(&controller::Controller::Mouse(controller::Mouse::Left))?;
         self.sync()
     }
 
