@@ -4,16 +4,16 @@ Gesture Recognition en Tiempo Real con BLE - Rust Puro + ONNX
 Sistema de reconocimiento de gestos que:
 1. Recibe datos IMU desde dispositivos BLE (5 sensores)
 2. Extrae gestos automáticamente usando GestureExtractor
-3. Realiza predicciones usando ONNX Runtime (sin Python)
-4. Replica el post-procesado del proyecto C++ (sin votación)
+3. Realiza predicciones usando ONNX Runtime 
+4. Replica el post-procesado del proyecto C++ 
+
+Antes de todo, asegurarse de tener onnxruntime instalado.
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz
+tar -xzf onnxruntime-linux-x64-1.22.0.tgz
 
 Para compilar y ejecutar:
-export LD_LIBRARY_PATH=onnxruntime-linux-x64-1.22.0/lib:$LD_LIBRARY_PATH
-cargo build --release
-./target/release/quiroscopio <MAC_ADDRESS>
-
-Ejemplo:
-./target/release/quiroscopio 28:CD:C1:08:37:69
+set -x LD_LIBRARY_PATH (pwd)/onnxruntime-linux-x64-1.22.0/lib $LD_LIBRARY_PATH
+     ./target/release/quiroscopio 28:CD:C1:08:37:69
 
 Para debug con teclado:
 sg input -c './target/debug/quiroscopio'
