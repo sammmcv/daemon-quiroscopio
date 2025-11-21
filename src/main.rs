@@ -23,38 +23,18 @@ use anyhow::Result;
 use crossbeam_channel::{bounded, select, unbounded};
 use std::collections::VecDeque;
 use std::env;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use quiroscopio::ble::{start_ble_receiver, SensorFrame};
 use quiroscopio::csv_loader::load_window_from_csv;
 use quiroscopio::gesture_classifier::GestureClassifier;
 use quiroscopio::gesture_extractor::{ExtractorParams, GestureExtractor};
 use quiroscopio::hid::{GestureAction, HidOutput};
-use quiroscopio::types::{SampleFrame, VotingWindows};
+use quiroscopio::mouse_filter::{GyroMouseConfig, GyroMouseFilter, Quaternion};
+use quiroscopio::types::{SampleFrame, VotingWindows, SAMPLING_RATE};
 
 const CONFIDENCE_THRESHOLD: f32 = 0.70; // Umbral de confianza mínima (igual que C++)
-
-/// Convierte el quaternion del sensor 0 en movimiento de cursor (dx, dy).
-fn orientation_to_cursor_movement(frame: &SampleFrame) -> (i32, i32) {
-    let w = frame.qw[0];
-    let x = frame.qx[0];
-    let y = frame.qy[0];
-    let z = frame.qz[0];
-
-    // Calcular pitch y roll
-    let pitch = (2.0 * (w * y + x * z)).atan2(1.0 - 2.0 * (y * y + z * z));
-    let roll = (2.0 * (w * x + y * z)).atan2(1.0 - 2.0 * (x * x + y * y));
-
-    let sensitivity = 0.5;
-    let dx = (roll.to_degrees() * sensitivity) as i32;
-    let dy = (pitch.to_degrees() * sensitivity) as i32;
-
-    let max_delta = 15;
-    let dx = dx.clamp(-max_delta, max_delta);
-    let dy = dy.clamp(-max_delta, max_delta);
-
-    (dx, dy)
-}
+const CURSOR_MOTION_WARMUP_SECS: f32 = 0.5; // Tiempo de movimiento continuo antes de mover cursor
 
 struct PostProcessResult {
     canonical_label: String,
@@ -420,6 +400,17 @@ fn main() -> Result<()> {
             select! {
                 recv(rx_gesture) -> action_result => {
                     if let Ok(action) = action_result {
+                        let cursor_active = *cursor_mode_clone.lock().unwrap();
+
+                        let should_drop_action = cursor_active && !matches!(
+                            action,
+                            GestureAction::Grab | GestureAction::Drop
+                        );
+
+                        if should_drop_action {
+                            continue;
+                        }
+
                         match action {
                             GestureAction::Grab => {
                                 *grab_was_active_clone.lock().unwrap() = true;
@@ -481,6 +472,16 @@ fn main() -> Result<()> {
     println!("🎬 Iniciando reconocimiento en tiempo real...\n");
 
     let mut _frames_received = 0u32;
+    let mut gyro_filter = GyroMouseFilter::new(GyroMouseConfig {
+        gain_x: 16.0,
+        gain_y: 8.0,
+        max_speed: 90.0,
+        ..GyroMouseConfig::default()
+    });
+    let mut cursor_mode_prev = false;
+    let mut last_quaternion: Option<Quaternion> = None;
+    let mut last_timestamp: Option<Instant> = None;
+    let mut cursor_motion_accum = 0.0f32;
 
     loop {
         select! {
@@ -491,13 +492,48 @@ fn main() -> Result<()> {
 
                         let sample_frame = SampleFrame::from_sensor_frame(&frame);
 
-                        // Control de cursor si está activo
-                        if *cursor_mode_active.lock().unwrap() {
-                            let (dx, dy) = orientation_to_cursor_movement(&sample_frame);
-                            if dx.abs() > 1 || dy.abs() > 1 {
-                                let _ = tx_cursor.send((dx, dy));
-                            }
+                        let cursor_active = *cursor_mode_active.lock().unwrap();
+                        let hand_quat = Quaternion::from_sample(&sample_frame, 0);
+                        let now = Instant::now();
+
+                        let dt = last_timestamp
+                            .map(|prev| {
+                                let delta = now.duration_since(prev).as_secs_f32();
+                                delta.clamp(1.0 / 500.0, 0.2)
+                            })
+                            .unwrap_or(1.0 / SAMPLING_RATE);
+                        last_timestamp = Some(now);
+
+                        let prev_quat = last_quaternion;
+                        last_quaternion = Some(hand_quat);
+
+                        if cursor_active && !cursor_mode_prev {
+                            gyro_filter.reset();
+                            cursor_motion_accum = 0.0;
                         }
+
+                        if cursor_active {
+                            if let Some(prev) = prev_quat {
+                                let (wx, wy, wz) = prev.angular_velocity_to(hand_quat, dt);
+                                let (dx, dy) = gyro_filter.update(wx, wy, wz);
+                                if dx != 0 || dy != 0 {
+                                    cursor_motion_accum = (cursor_motion_accum + dt)
+                                        .min(CURSOR_MOTION_WARMUP_SECS);
+                                    if cursor_motion_accum >= CURSOR_MOTION_WARMUP_SECS {
+                                        let _ = tx_cursor.send((dx, dy));
+                                    }
+                                } else {
+                                    cursor_motion_accum = 0.0;
+                                }
+                            } else {
+                                gyro_filter.reset();
+                                cursor_motion_accum = 0.0;
+                            }
+                        } else {
+                            cursor_motion_accum = 0.0;
+                        }
+
+                        cursor_mode_prev = cursor_active;
 
                         // Alimentar el GestureExtractor
                         extractor.feed(sample_frame);

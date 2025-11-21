@@ -4,4 +4,5 @@ pub mod feature_extractor;
 pub mod gesture_classifier;
 pub mod gesture_extractor;
 pub mod hid;
+pub mod mouse_filter;
 pub mod types;
