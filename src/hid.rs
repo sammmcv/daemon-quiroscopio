@@ -86,6 +86,17 @@ impl HidOutput {
         self.sync()
     }
 
+    /// Hace un click simple (press + release)
+    fn click_left(&mut self) -> Result<(), uinput::Error> {
+        self.dev
+            .press(&controller::Controller::Mouse(controller::Mouse::Left))?;
+        self.sync()?;
+        std::thread::sleep(Duration::from_millis(10));
+        self.dev
+            .release(&controller::Controller::Mouse(controller::Mouse::Left))?;
+        self.sync()
+    }
+
     /// Mueve el cursor en relación a su posición actual (dx, dy en píxeles)
     pub fn move_cursor(&mut self, dx: i32, dy: i32) -> Result<(), uinput::Error> {
         self.dev.send(relative::Position::X, dx)?;
@@ -94,10 +105,20 @@ impl HidOutput {
     }
 
     pub fn send(&mut self, action: GestureAction) -> Result<(), uinput::Error> {
+        self.send_with_mode(action, false)
+    }
+
+    pub fn send_with_mode(&mut self, action: GestureAction, is_cursor_mode: bool) -> Result<(), uinput::Error> {
         match action {
             GestureAction::SlideDer => self.slide_der(),
             GestureAction::SlideIzq => self.slide_izq(),
-            GestureAction::ZoomIn => self.zoom_in(),
+            GestureAction::ZoomIn => {
+                if is_cursor_mode {
+                    self.click_left()
+                } else {
+                    self.zoom_in()
+                }
+            }
             GestureAction::ZoomOut => self.zoom_out(),
             GestureAction::Grab => self.grab(),
             GestureAction::Drop => self.drop(),

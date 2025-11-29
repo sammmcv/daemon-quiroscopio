@@ -108,6 +108,7 @@ pub struct GyroMouseConfig {
     pub axis_sign_y: f32,
     pub horizontal_axis: MotionAxis,
     pub vertical_axis: MotionAxis,
+    pub idle_timeout: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -130,7 +131,7 @@ impl MotionAxis {
 impl Default for GyroMouseConfig {
     fn default() -> Self {
         Self {
-            deadzone_omega: 0.045, // rad/s (3x mayor)
+            deadzone_omega: 0.008, // rad/s - muy sensible para movimientos suaves
             gain_x: 500.0,         // px per rad/s
             gain_y: 500.0,
             max_speed: 800.0,
@@ -139,6 +140,7 @@ impl Default for GyroMouseConfig {
             axis_sign_y: 1.0,
             horizontal_axis: MotionAxis::Rx, // pitch controla X
             vertical_axis: MotionAxis::Ry,   // yaw controla Y
+            idle_timeout: 1.0, // 1 segundo sin movimiento para detenerse
         }
     }
 }
@@ -147,6 +149,7 @@ pub struct GyroMouseFilter {
     prev_dx: f32,
     prev_dy: f32,
     config: GyroMouseConfig,
+    idle_time: f32,
 }
 
 impl GyroMouseFilter {
@@ -155,16 +158,19 @@ impl GyroMouseFilter {
             prev_dx: 0.0,
             prev_dy: 0.0,
             config,
+            idle_time: 0.0,
         }
     }
 
     pub fn reset(&mut self) {
         self.prev_dx = 0.0;
         self.prev_dy = 0.0;
+        self.idle_time = 0.0;
     }
 
     /// `wx`, `wy`, `wz` son velocidades angulares (rad/s) ya estimadas.
-    pub fn update(&mut self, wx: f32, wy: f32, wz: f32) -> (i32, i32) {
+    /// `dt` es el tiempo transcurrido desde la última actualización.
+    pub fn update(&mut self, wx: f32, wy: f32, wz: f32, dt: f32) -> (i32, i32) {
         let rx = wx;
         let ry = wy;
         let rz = wz;
@@ -180,10 +186,18 @@ impl GyroMouseFilter {
         }
 
         if vx == 0.0 && vy == 0.0 {
-            self.prev_dx *= 1.0 - self.config.alpha;
-            self.prev_dy *= 1.0 - self.config.alpha;
+            self.idle_time += dt;
+            if self.idle_time >= self.config.idle_timeout {
+                self.prev_dx *= 1.0 - self.config.alpha;
+                self.prev_dy *= 1.0 - self.config.alpha;
+                return (self.prev_dx.round() as i32, self.prev_dy.round() as i32);
+            }
+            // Mantener movimiento previo durante el timeout
             return (self.prev_dx.round() as i32, self.prev_dy.round() as i32);
         }
+
+        // Hay movimiento, resetear idle_time
+        self.idle_time = 0.0;
 
         let mut dx = vx * self.config.axis_sign_x * self.config.gain_x;
         let mut dy = vy * self.config.axis_sign_y * self.config.gain_y;
@@ -209,7 +223,7 @@ mod tests {
     #[test]
     fn deadzone_blocks_small_motion() {
         let mut filter = GyroMouseFilter::new(GyroMouseConfig::default());
-        let (dx, dy) = filter.update(0.0, 0.01, 0.0);
+        let (dx, dy) = filter.update(0.0, 0.01, 0.0, 0.02);
         assert_eq!((dx, dy), (0, 0));
     }
 
@@ -222,8 +236,8 @@ mod tests {
         };
         let mut filter_neg = GyroMouseFilter::new(cfg_negative);
 
-        let (dx_pos, _) = filter_pos.update(1.5, 0.0, 0.0);
-        let (dx_neg, _) = filter_neg.update(1.5, 0.0, 0.0);
+        let (dx_pos, _) = filter_pos.update(1.5, 0.0, 0.0, 0.02);
+        let (dx_neg, _) = filter_neg.update(1.5, 0.0, 0.0, 0.02);
 
         assert_ne!(dx_pos, 0);
         assert_eq!(dx_pos, -dx_neg);
@@ -239,12 +253,12 @@ mod tests {
         };
         let mut filter = GyroMouseFilter::new(cfg_swapped);
 
-        let (dx_z, dy_z) = filter.update(0.0, 0.0, 3.0);
+        let (dx_z, dy_z) = filter.update(0.0, 0.0, 3.0, 0.02);
         assert_ne!(dx_z, 0);
         assert_eq!(dy_z, 0);
 
         filter.reset();
-        let (_dx_y, dy_y) = filter.update(0.0, 3.0, 0.0);
+        let (_dx_y, dy_y) = filter.update(0.0, 3.0, 0.0, 0.02);
         assert_ne!(dy_y, 0);
     }
 

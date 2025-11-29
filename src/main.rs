@@ -404,7 +404,7 @@ fn main() -> Result<()> {
 
                         let should_drop_action = cursor_active && !matches!(
                             action,
-                            GestureAction::Grab | GestureAction::Drop
+                            GestureAction::Grab | GestureAction::Drop | GestureAction::ZoomIn
                         );
 
                         if should_drop_action {
@@ -436,7 +436,7 @@ fn main() -> Result<()> {
                             _ => {}
                         }
 
-                        if let Err(e) = hid.send(action) {
+                        if let Err(e) = hid.send_with_mode(action, cursor_active) {
                             eprintln!("❌ Error enviando gesto HID {:?}: {}", action, e);
                         }
                     }
@@ -473,9 +473,13 @@ fn main() -> Result<()> {
 
     let mut _frames_received = 0u32;
     let mut gyro_filter = GyroMouseFilter::new(GyroMouseConfig {
-        gain_x: 16.0,
-        gain_y: 8.0,
-        max_speed: 90.0,
+        gain_x: 18.0,
+        gain_y: 12.0,
+        max_speed: 40.0,
+        alpha: 0.35,  // Más suavizado
+        axis_sign_y: 1.0,  // Movimiento vertical normal
+        horizontal_axis: quiroscopio::mouse_filter::MotionAxis::Rx,  // Z controla movimiento horizontal
+        vertical_axis: quiroscopio::mouse_filter::MotionAxis::Rz,  // X controla movimiento vertical
         ..GyroMouseConfig::default()
     });
     let mut cursor_mode_prev = false;
@@ -515,7 +519,7 @@ fn main() -> Result<()> {
                         if cursor_active {
                             if let Some(prev) = prev_quat {
                                 let (wx, wy, wz) = prev.angular_velocity_to(hand_quat, dt);
-                                let (dx, dy) = gyro_filter.update(wx, wy, wz);
+                                let (dx, dy) = gyro_filter.update(wx, wy, wz, dt);
                                 if dx != 0 || dy != 0 {
                                     cursor_motion_accum = (cursor_motion_accum + dt)
                                         .min(CURSOR_MOTION_WARMUP_SECS);
